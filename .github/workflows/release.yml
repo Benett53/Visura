@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - run: cargo build --release
+
+      # A single self-contained file is the point, so the build is checked
+      # before anything is packaged.
+      - name: Check the executable
+        shell: pwsh
+        run: |
+          $exe = "target/release/visura.exe"
+          if (-not (Test-Path $exe)) { throw "executable missing" }
+          $size = (Get-Item $exe).Length / 1MB
+          Write-Host ("Size: {0:N1} MB" -f $size)
+          if ($size -gt 20) { throw "executable unexpectedly large: $size MB" }
+          Copy-Item $exe "Visura.exe"
+          Copy-Item $exe "packaging/Visura.exe"
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { $version = "0.0.0" }
+          $iscc = Get-ChildItem "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+                                "C:\Program Files\Inno Setup 6\ISCC.exe" `
+                                -ErrorAction SilentlyContinue |
+                  Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup -y --no-progress
+            $iscc = Get-ChildItem "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" |
+                    Select-Object -First 1
+          }
+          & $iscc.FullName "/DAppVersion=$version" "packaging/visura.iss"
+          if ($LASTEXITCODE -ne 0) { throw "the installer did not build" }
+          Copy-Item "packaging/VisuraSetup.exe" "VisuraSetup.exe"
+          Write-Host ("Installer: {0:N1} MB" -f ((Get-Item "VisuraSetup.exe").Length / 1MB))
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            Visura.exe
+            VisuraSetup.exe
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+      - run: cargo build --release
+      - run: cp target/release/visura visura-linux-x86_64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: visura-linux-x86_64
+
+  publish:
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            VisuraSetup.exe
+            Visura.exe
+            visura-linux-x86_64
+          body_path: CHANGELOG.md
+          draft: false
