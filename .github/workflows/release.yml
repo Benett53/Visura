@@ -80,11 +80,19 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
+
+      # Release notes are what changed in this version, not the whole history,
+      # so only the top section of the changelog is used.
+      - name: Notes for this version
+        run: |
+          awk '/^## /{ if (seen) exit; seen = 1; next } seen' CHANGELOG.md > NOTES.md
+          cat NOTES.md
+
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             VisuraSetup.exe
             Visura.exe
             visura-linux-x86_64
-          body_path: CHANGELOG.md
+          body_path: NOTES.md
           draft: false

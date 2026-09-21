@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.1.1
+
+Fixed:
+
+- Shortcuts did nothing while the window was minimised or behind a full screen
+  program. They were read once per drawn frame, and an idle window draws none;
+  the press only arrived when something else happened to wake the window. The
+  system now wakes the program itself, so a shortcut works whatever the window
+  is doing. Taking a shot from a minimised window also leaves it minimised.
+- The window came back as a stub in the corner after a capture that started
+  from the task bar.
+- The shortcut printed next to each sidebar entry overlapped the label and was
+  cut off for anything longer than a single key. Removed; the settings screen
+  shows shortcuts.
+
+Changed:
+
+- The outline around a detected window is dashed and moving, and slides to the
+  next window rather than jumping.
+- Anonymous file names keep the dated folders, so a shot is still easy to find.
+  Only the name changes, and neither encoder writes a timestamp or EXIF.
+- Theme and accent take effect when saved instead of on the next start.
+
 ## 0.1.0
 
 First release.

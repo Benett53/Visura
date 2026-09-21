@@ -166,6 +166,43 @@ mod tests {
         assert!(low.len() < high.len());
     }
 
+    /// Anonymous file names would be pointless if the file itself carried a
+    /// timestamp or a camera-style comment, so the encoders are checked for
+    /// anything beyond the image.
+    #[test]
+    fn png_output_carries_no_metadata() {
+        let bytes = encode(&square(16, 16), Format::Png, 90).unwrap();
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+
+        let mut tags = Vec::new();
+        let mut at = 8;
+        while at + 8 <= bytes.len() {
+            let length = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+            tags.push(String::from_utf8_lossy(&bytes[at + 4..at + 8]).into_owned());
+            at += 12 + length;
+        }
+        for unwanted in ["tEXt", "iTXt", "zTXt", "tIME", "eXIf"] {
+            assert!(
+                !tags.iter().any(|tag| tag == unwanted),
+                "{unwanted} should not be written, found {tags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn jpeg_output_carries_no_exif() {
+        let bytes = encode(&square(16, 16), Format::Jpeg, 80).unwrap();
+        // APP1 is where EXIF lives; APP0 is the plain JFIF header.
+        assert!(
+            !bytes.windows(2).any(|pair| pair == [0xFF, 0xE1]),
+            "an APP1 segment would mean EXIF"
+        );
+        assert!(
+            !bytes.windows(4).any(|w| w == b"Exif"),
+            "no EXIF marker should be present"
+        );
+    }
+
     #[test]
     fn cropping_keeps_the_right_pixels() {
         let image = square(4, 4);

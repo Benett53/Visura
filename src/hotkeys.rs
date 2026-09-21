@@ -5,6 +5,7 @@
 //! program. An empty string means the action has no shortcut at all.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager};
@@ -321,23 +322,58 @@ pub fn is_valid(shortcut: &str) -> bool {
 }
 
 /// Owns the registrations and turns incoming events back into actions.
+///
+/// The system delivers a shortcut on its own thread at any moment, including
+/// while the window is minimised or a full screen program is in front. Polling
+/// a queue once per frame therefore misses them: egui only runs a frame when
+/// something asks it to, and nothing does while the window sits idle. The
+/// handler below is what asks.
 pub struct Manager {
     inner: Option<GlobalHotKeyManager>,
-    bound: HashMap<u32, Action>,
+    /// Shared with the event handler, which runs on the system's own thread.
+    bound: Arc<Mutex<HashMap<u32, Action>>>,
+    pending: Arc<Mutex<Vec<Action>>>,
     registered: Vec<HotKey>,
     /// Shortcuts the system refused, with the reason. Shown in the settings.
     pub problems: Vec<String>,
 }
 
 impl Manager {
-    pub fn new() -> Self {
+    /// The context is only used to wake the program up when a shortcut
+    /// arrives, so the capture starts whatever the window is doing.
+    pub fn new(ctx: egui::Context) -> Self {
         let (inner, problems) = match GlobalHotKeyManager::new() {
             Ok(manager) => (Some(manager), Vec::new()),
             Err(e) => (None, vec![format!("Shortcuts are unavailable: {e}")]),
         };
+
+        let bound: Arc<Mutex<HashMap<u32, Action>>> = Arc::new(Mutex::new(HashMap::new()));
+        let pending: Arc<Mutex<Vec<Action>>> = Arc::new(Mutex::new(Vec::new()));
+        {
+            let bound = bound.clone();
+            let pending = pending.clone();
+            GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
+                // Press and release both arrive; only the press should fire.
+                if event.state != global_hotkey::HotKeyState::Pressed {
+                    return;
+                }
+                let action = bound
+                    .lock()
+                    .ok()
+                    .and_then(|map| map.get(&event.id).copied());
+                if let Some(action) = action {
+                    if let Ok(mut queue) = pending.lock() {
+                        queue.push(action);
+                    }
+                    ctx.request_repaint();
+                }
+            }));
+        }
+
         Self {
             inner,
-            bound: HashMap::new(),
+            bound,
+            pending,
             registered: Vec::new(),
             problems,
         }
@@ -352,7 +388,11 @@ impl Manager {
         for hotkey in self.registered.drain(..) {
             let _ = manager.unregister(hotkey);
         }
-        self.bound.clear();
+        let mut bound = match self.bound.lock() {
+            Ok(bound) => bound,
+            Err(_) => return,
+        };
+        bound.clear();
         self.problems.clear();
 
         for (action, shortcut) in [
@@ -366,7 +406,7 @@ impl Manager {
             match parse(shortcut) {
                 Ok(hotkey) => match manager.register(hotkey) {
                     Ok(()) => {
-                        self.bound.insert(hotkey.id(), action);
+                        bound.insert(hotkey.id(), action);
                         self.registered.push(hotkey);
                     }
                     Err(e) => self.problems.push(format!(
@@ -381,19 +421,12 @@ impl Manager {
         }
     }
 
-    /// Drain everything the system has delivered since the last call.
+    /// Take everything the handler collected since the last call.
     pub fn poll(&self) -> Vec<Action> {
-        let mut actions = Vec::new();
-        while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-            // Press and release both arrive; only the press should fire.
-            if event.state != global_hotkey::HotKeyState::Pressed {
-                continue;
-            }
-            if let Some(action) = self.bound.get(&event.id) {
-                actions.push(*action);
-            }
+        match self.pending.lock() {
+            Ok(mut queue) => std::mem::take(&mut *queue),
+            Err(_) => Vec::new(),
         }
-        actions
     }
 
     /// Stop listening, so a shortcut being recorded is not swallowed by the
@@ -405,7 +438,9 @@ impl Manager {
         for hotkey in self.registered.drain(..) {
             let _ = manager.unregister(hotkey);
         }
-        self.bound.clear();
+        if let Ok(mut bound) = self.bound.lock() {
+            bound.clear();
+        }
     }
 }
 

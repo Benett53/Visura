@@ -48,13 +48,12 @@ fn sidebar(app: &mut App, ui: &mut egui::Ui) {
             ui.label(RichText::new("Visura").size(15.0).strong());
             ui.add_space(12.0);
 
-            let keys = app.config.hotkeys.clone();
-            for (label, shortcut, mode) in [
-                ("Capture region", keys.region, Mode::Region),
-                ("Capture window", keys.window, Mode::ActiveWindow),
-                ("Capture screen", keys.fullscreen, Mode::Fullscreen),
+            for (label, mode) in [
+                ("Capture region", Mode::Region),
+                ("Capture window", Mode::ActiveWindow),
+                ("Capture screen", Mode::Fullscreen),
             ] {
-                if nav_item(ui, &palette, label, &shortcut, false).clicked() {
+                if nav_item(ui, &palette, label, false).clicked() {
                     app.request_capture(mode);
                 }
             }
@@ -63,13 +62,13 @@ fn sidebar(app: &mut App, ui: &mut egui::Ui) {
             ui.separator();
             ui.add_space(6.0);
 
-            if nav_item(ui, &palette, "All screenshots", "", app.history_open).clicked() {
+            if nav_item(ui, &palette, "All screenshots", app.history_open).clicked() {
                 app.history_open = !app.history_open;
                 if app.history_open {
                     app.refresh();
                 }
             }
-            if nav_item(ui, &palette, "Open folder", "", false).clicked() {
+            if nav_item(ui, &palette, "Open folder", false).clicked() {
                 let folder = app.config.folder.clone();
                 let _ = std::fs::create_dir_all(&folder);
                 crate::platform::open_path(&folder);
@@ -78,7 +77,7 @@ fn sidebar(app: &mut App, ui: &mut egui::Ui) {
             ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
                 ui.add_space(10.0);
                 let on_settings = app.page == Page::Settings;
-                if nav_item(ui, &palette, "Settings", "", on_settings).clicked() {
+                if nav_item(ui, &palette, "Settings", on_settings).clicked() {
                     if on_settings {
                         app.page = Page::Recent;
                     } else {
@@ -91,12 +90,15 @@ fn sidebar(app: &mut App, ui: &mut egui::Ui) {
         });
 }
 
-/// One row of the sidebar: a label on the left, its shortcut on the right.
+/// One row of the sidebar.
+///
+/// The shortcut used to be printed on the right. It did not survive a
+/// combination of more than one key: the text ran into the label and was cut
+/// off. The settings screen is where shortcuts belong.
 fn nav_item(
     ui: &mut egui::Ui,
     palette: &theme::Palette,
     label: &str,
-    hint: &str,
     selected: bool,
 ) -> egui::Response {
     let width = ui.available_width();
@@ -119,15 +121,6 @@ fn nav_item(
             FontId::proportional(13.0),
             palette.text,
         );
-        if !hint.is_empty() {
-            painter.text(
-                egui::pos2(rect.max.x - 8.0, rect.center().y),
-                Align2::RIGHT_CENTER,
-                hint,
-                FontId::proportional(10.0),
-                palette.muted,
-            );
-        }
     }
     response
 }

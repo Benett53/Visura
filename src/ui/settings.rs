@@ -35,8 +35,9 @@ impl App {
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.add_enabled(dirty, egui::Button::new("Save")).clicked() {
+                            let ctx = ui.ctx().clone();
                             self.stop_recording();
-                            self.apply_settings();
+                            self.apply_settings(&ctx);
                             self.page = Page::Recent;
                         }
                         if ui.button(if dirty { "Discard" } else { "Close" }).clicked() {
@@ -102,19 +103,28 @@ impl App {
             ui.add_space(10.0);
             ui.checkbox(
                 &mut self.draft.anonymous_names,
-                "Anonymous file names (random characters, no date, no program)",
+                "Anonymous file names (random characters, nothing about the shot)",
             );
+            if self.draft.anonymous_names {
+                ui.label(
+                    RichText::new(
+                        "    The folders stay as they are, so shots are still easy to find.",
+                    )
+                    .color(palette.muted)
+                    .size(11.5),
+                );
+            }
 
             ui.add_space(6.0);
             let named = !self.draft.anonymous_names;
+            labelled(ui, "Subfolder", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.draft.subfolder)
+                        .desired_width(240.0)
+                        .hint_text("leave empty for one flat folder"),
+                );
+            });
             ui.add_enabled_ui(named, |ui| {
-                labelled(ui, "Subfolder", |ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.draft.subfolder)
-                            .desired_width(240.0)
-                            .hint_text("leave empty for one flat folder"),
-                    );
-                });
                 labelled(ui, "File name", |ui| {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.draft.filename).desired_width(240.0),
@@ -381,18 +391,17 @@ impl App {
             width: 1280,
             height: 720,
         };
-        if self.draft.anonymous_names {
-            return self
-                .draft
-                .folder
-                .join(format!("q7x2m9k4d1bz.{}", self.draft.format.extension()))
-                .display()
-                .to_string();
-        }
+        // A fixed example name, so the preview does not reshuffle itself on
+        // every frame the way a real random name would.
+        let pattern = if self.draft.anonymous_names {
+            "q7x2m9k4d1bz"
+        } else {
+            &self.draft.filename
+        };
         naming::target_path(
             &self.draft.folder,
             &self.draft.subfolder,
-            &self.draft.filename,
+            pattern,
             self.draft.format.extension(),
             false,
             &ctx,

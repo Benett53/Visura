@@ -25,7 +25,7 @@ pub struct Tray;
 
 #[cfg(not(windows))]
 impl Tray {
-    pub fn new() -> Option<Self> {
+    pub fn new(_ctx: egui::Context) -> Option<Self> {
         None
     }
 
@@ -36,13 +36,16 @@ impl Tray {
 
 #[cfg(windows)]
 mod windows_tray {
+    use std::sync::{Arc, Mutex};
+
     use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
     use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
     use super::Action;
 
-    pub struct Tray {
-        _icon: tray_icon::TrayIcon,
+    /// Which menu entry is which, shared with the handlers that run on the
+    /// system's own thread.
+    struct Ids {
         region: MenuId,
         window: MenuId,
         fullscreen: MenuId,
@@ -51,18 +54,26 @@ mod windows_tray {
         quit: MenuId,
     }
 
+    pub struct Tray {
+        _icon: tray_icon::TrayIcon,
+        pending: Arc<Mutex<Vec<Action>>>,
+    }
+
     impl Tray {
-        pub fn new() -> Option<Self> {
+        /// The context is only used to wake the program up when the tray is
+        /// clicked. Without that the click sits in a queue until something
+        /// else happens to draw a frame.
+        pub fn new(ctx: egui::Context) -> Option<Self> {
             let (rgba, width, height) = crate::icon::rgba()?;
             let icon = Icon::from_rgba(rgba, width, height).ok()?;
 
             let menu = Menu::new();
-            let region = MenuItem::new("Bereich aufnehmen", true, None);
-            let window = MenuItem::new("Fenster aufnehmen", true, None);
-            let fullscreen = MenuItem::new("Ganzer Bildschirm", true, None);
-            let history = MenuItem::new("Historie", true, None);
-            let settings = MenuItem::new("Einstellungen", true, None);
-            let quit = MenuItem::new("Beenden", true, None);
+            let region = MenuItem::new("Capture region", true, None);
+            let window = MenuItem::new("Capture window", true, None);
+            let fullscreen = MenuItem::new("Capture screen", true, None);
+            let history = MenuItem::new("Open Visura", true, None);
+            let settings = MenuItem::new("Settings", true, None);
+            let quit = MenuItem::new("Quit", true, None);
 
             menu.append(&region).ok()?;
             menu.append(&window).ok()?;
@@ -73,6 +84,15 @@ mod windows_tray {
             menu.append(&PredefinedMenuItem::separator()).ok()?;
             menu.append(&quit).ok()?;
 
+            let ids = Ids {
+                region: region.id().clone(),
+                window: window.id().clone(),
+                fullscreen: fullscreen.id().clone(),
+                history: history.id().clone(),
+                settings: settings.id().clone(),
+                quit: quit.id().clone(),
+            };
+
             let tray = TrayIconBuilder::new()
                 .with_tooltip("Visura")
                 .with_icon(icon)
@@ -80,51 +100,66 @@ mod windows_tray {
                 .build()
                 .ok()?;
 
+            let pending: Arc<Mutex<Vec<Action>>> = Arc::new(Mutex::new(Vec::new()));
+
+            {
+                let pending = pending.clone();
+                let ctx = ctx.clone();
+                MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+                    let id = &event.id;
+                    let action = if id == &ids.region {
+                        Action::Region
+                    } else if id == &ids.window {
+                        Action::Window
+                    } else if id == &ids.fullscreen {
+                        Action::Fullscreen
+                    } else if id == &ids.history {
+                        Action::Show
+                    } else if id == &ids.settings {
+                        Action::Settings
+                    } else if id == &ids.quit {
+                        Action::Quit
+                    } else {
+                        return;
+                    };
+                    if let Ok(mut queue) = pending.lock() {
+                        queue.push(action);
+                    }
+                    ctx.request_repaint();
+                }));
+            }
+
+            {
+                let pending = pending.clone();
+                TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+                    // A left click opens the window; the menu is on right
+                    // click and arrives through MenuEvent above.
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        if let Ok(mut queue) = pending.lock() {
+                            queue.push(Action::Show);
+                        }
+                        ctx.request_repaint();
+                    }
+                }));
+            }
+
             Some(Self {
                 _icon: tray,
-                region: region.id().clone(),
-                window: window.id().clone(),
-                fullscreen: fullscreen.id().clone(),
-                history: history.id().clone(),
-                settings: settings.id().clone(),
-                quit: quit.id().clone(),
+                pending,
             })
         }
 
+        /// Take everything the handlers collected since the last call.
         pub fn poll(&self) -> Vec<Action> {
-            let mut actions = Vec::new();
-            while let Ok(event) = MenuEvent::receiver().try_recv() {
-                let id = &event.id;
-                let action = if id == &self.region {
-                    Action::Region
-                } else if id == &self.window {
-                    Action::Window
-                } else if id == &self.fullscreen {
-                    Action::Fullscreen
-                } else if id == &self.history {
-                    Action::Show
-                } else if id == &self.settings {
-                    Action::Settings
-                } else if id == &self.quit {
-                    Action::Quit
-                } else {
-                    continue;
-                };
-                actions.push(action);
+            match self.pending.lock() {
+                Ok(mut queue) => std::mem::take(&mut *queue),
+                Err(_) => Vec::new(),
             }
-            while let Ok(event) = TrayIconEvent::receiver().try_recv() {
-                // A left click opens the history; the menu is on right click
-                // and is delivered through MenuEvent above.
-                if let TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                } = event
-                {
-                    actions.push(Action::Show);
-                }
-            }
-            actions
         }
     }
 }

@@ -7,7 +7,7 @@
 //! highlighted.
 
 use egui::{
-    Align2, Color32, CornerRadius, FontId, Pos2, Rect as UiRect, Sense, Stroke, Vec2, pos2,
+    Align2, Color32, CornerRadius, FontId, Pos2, Rect as UiRect, Sense, Shape, Stroke, Vec2, pos2,
 };
 
 use crate::config::Overlay as OverlayConfig;
@@ -18,6 +18,14 @@ const CLICK_SLOP: i32 = 4;
 /// Half width, in source pixels, of the area the magnifier shows.
 const MAGNIFIER_RADIUS: f32 = 11.0;
 const MAGNIFIER_SIZE: f32 = 132.0;
+/// How quickly the window outline travels to a new window. Higher is snappier;
+/// this settles in rather under a tenth of a second.
+const OUTLINE_SPEED: f32 = 22.0;
+/// Length of a dash and of the gap after it, in points.
+const DASH: f32 = 9.0;
+const GAP: f32 = 6.0;
+/// How fast the dashes crawl along the outline, in points per second.
+const ANT_SPEED: f32 = 26.0;
 
 pub enum Outcome {
     /// Still running.
@@ -35,6 +43,9 @@ pub struct Overlay {
     drag_start: Option<(i32, i32)>,
     dragged: bool,
     cursor: (i32, i32),
+    /// The outline being drawn right now, in physical pixels but kept as
+    /// floats so it can travel to a new window instead of jumping there.
+    outline: Option<[f32; 4]>,
     accent: Color32,
     config: OverlayConfig,
 }
@@ -59,6 +70,7 @@ impl Overlay {
             // highlighting whatever happens to sit at the top left corner
             // until the user moves the mouse.
             cursor: crate::platform::cursor_position(),
+            outline: None,
             accent: Color32::from_rgb(accent[0], accent[1], accent[2]),
             config,
         }
@@ -198,6 +210,28 @@ impl Overlay {
             Color32::WHITE,
         );
 
+        // The outline eases across to a new window rather than jumping, which
+        // makes it obvious that one outline moved instead of two blinking.
+        let (delta, time) = ui.input(|i| (i.stable_dt.clamp(0.0, 0.1), i.time));
+        self.outline = match hovered.as_ref().map(|w| w.rect) {
+            Some(target) if selection.is_none() => {
+                let goal = [
+                    target.x as f32,
+                    target.y as f32,
+                    target.w as f32,
+                    target.h as f32,
+                ];
+                Some(match self.outline {
+                    Some(current) => {
+                        let step = 1.0 - (-delta * OUTLINE_SPEED).exp();
+                        std::array::from_fn(|i| current[i] + (goal[i] - current[i]) * step)
+                    }
+                    None => goal,
+                })
+            }
+            _ => None,
+        };
+
         let dim = Color32::from_black_alpha((self.config.dim * 255.0) as u8);
         match (selection, &hovered) {
             // A region being dragged is cut out of the dimming, so the part
@@ -234,22 +268,14 @@ impl Overlay {
             // drawn on the edge says exactly what a click would take.
             (None, Some(window)) => {
                 painter.rect_filled(area, 0.0, dim);
-                let outline = map.to_points(window.rect);
-                painter.rect_stroke(
-                    outline,
-                    0.0,
-                    Stroke::new(2.0, self.accent),
-                    egui::StrokeKind::Inside,
-                );
-                // A thin dark line just outside keeps the accent readable on a
-                // light background as well as a dark one.
-                painter.rect_stroke(
-                    outline.expand(1.0),
-                    0.0,
-                    Stroke::new(1.0, Color32::from_black_alpha(140)),
-                    egui::StrokeKind::Inside,
-                );
-                self.draw_readout(&painter, outline, window.rect, Some(window));
+                if let Some(current) = self.outline {
+                    let outline = UiRect::from_min_max(
+                        map.to_ui_exact(current[0], current[1]),
+                        map.to_ui_exact(current[0] + current[2], current[1] + current[3]),
+                    );
+                    self.draw_marching_ants(&painter, outline, time);
+                    self.draw_readout(&painter, outline, window.rect, Some(window));
+                }
             }
             (None, None) => {
                 painter.rect_filled(area, 0.0, dim);
@@ -272,6 +298,34 @@ impl Overlay {
         }
 
         Outcome::Pending
+    }
+
+    /// A crawling dashed border. A still line disappears into whatever it is
+    /// drawn over; one that moves does not.
+    fn draw_marching_ants(&self, painter: &egui::Painter, rect: UiRect, time: f64) {
+        let path = [
+            rect.left_top(),
+            rect.right_top(),
+            rect.right_bottom(),
+            rect.left_bottom(),
+            rect.left_top(),
+        ];
+        // A dark line underneath keeps the accent readable over a light window
+        // as well as a dark one.
+        painter.rect_stroke(
+            rect,
+            0.0,
+            Stroke::new(3.0, Color32::from_black_alpha(90)),
+            egui::StrokeKind::Inside,
+        );
+        let offset = -(time as f32 * ANT_SPEED) % (DASH + GAP);
+        painter.extend(Shape::dashed_line_with_offset(
+            &path,
+            Stroke::new(2.0, self.accent),
+            &[DASH],
+            &[GAP],
+            offset,
+        ));
     }
 
     fn draw_handles(&self, painter: &egui::Painter, hole: UiRect) {
@@ -444,6 +498,17 @@ impl Mapping {
         (
             self.screen.x + (fx * self.screen.w as f32).round() as i32,
             self.screen.y + (fy * self.screen.h as f32).round() as i32,
+        )
+    }
+
+    /// The same mapping as `to_ui`, but for a position that is mid animation
+    /// and therefore not on a whole pixel yet.
+    fn to_ui_exact(&self, x: f32, y: f32) -> Pos2 {
+        let fx = (x - self.screen.x as f32) / self.screen.w.max(1) as f32;
+        let fy = (y - self.screen.y as f32) / self.screen.h.max(1) as f32;
+        pos2(
+            self.area.min.x + fx * self.area.width(),
+            self.area.min.y + fy * self.area.height(),
         )
     }
 

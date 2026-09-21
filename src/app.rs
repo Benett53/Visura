@@ -30,6 +30,17 @@ pub enum Page {
     Settings,
 }
 
+/// Where the window belongs once a capture is over.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Restore {
+    /// It was on screen, so it goes back on screen.
+    Shown,
+    /// It was on the task bar only, and that is where it stays.
+    Minimized,
+    /// It was in the notification area, or never shown at all.
+    Hidden,
+}
+
 pub struct Toast {
     pub text: String,
     pub error: bool,
@@ -40,10 +51,8 @@ pub struct Toast {
 /// is read, and that takes a frame or two.
 struct Pending {
     mode: Mode,
-    /// The window was on screen when the capture was asked for, so it belongs
-    /// back on screen afterwards. This is not the same as having hidden it:
-    /// with hiding switched off the window still has to come back.
-    was_visible: bool,
+    /// Where the window belongs when the capture is done.
+    restore: Restore,
     /// Whether this capture hid the window and has to wait for it to go.
     hiding: bool,
     /// Captured before hiding, because afterwards the front window is a
@@ -78,8 +87,17 @@ pub struct App {
     /// Where the window sat before it became the overlay: outer position
     /// and inner size, both in points.
     last_geometry: Option<(egui::Pos2, egui::Vec2)>,
-    /// Whether the window should be on screen once the overlay is done.
-    overlay_restore: bool,
+    /// Minimised is not the same as hidden: the window is still on the task
+    /// bar and still has a place to go back to. Tracked from the platform
+    /// rather than assumed, because the user can minimise at any time.
+    minimized: bool,
+    /// How the window should end up once the overlay is done.
+    overlay_restore: Restore,
+    /// Where the window was before the overlay took it over.
+    saved_placement: Option<platform::Placement>,
+    /// Applied one pass after the overlay closes, once the window has its
+    /// decorations back.
+    deferred_placement: Option<(platform::Placement, Restore)>,
     /// The window is put in the middle of the screen once, on the first frame,
     /// when its real size is known.
     centred: bool,
@@ -110,7 +128,7 @@ impl App {
         let (config, problem) = Config::load();
         ui::theme::apply(&cc.egui_ctx, config.ui.theme, config.ui.accent);
 
-        let mut hotkeys = hotkeys::Manager::new();
+        let mut hotkeys = hotkeys::Manager::new(cc.egui_ctx.clone());
         hotkeys.apply(&config.hotkeys);
 
         let show_requested = Arc::new(AtomicBool::new(false));
@@ -123,7 +141,7 @@ impl App {
             });
         }
 
-        let tray = tray::Tray::new();
+        let tray = tray::Tray::new(cc.egui_ctx.clone());
         let shots = library::scan(&config.folder);
 
         let mut app = Self {
@@ -145,7 +163,10 @@ impl App {
             overlay: None,
             pending: None,
             last_geometry: None,
-            overlay_restore: false,
+            minimized: false,
+            overlay_restore: Restore::Hidden,
+            saved_placement: None,
+            deferred_placement: None,
             centred: false,
             history_open: false,
             recording: None,
@@ -240,10 +261,13 @@ impl App {
         // platform layer refuses to report, so the window behind it is meant.
         let front_window = platform::foreground_window()
             .or_else(|| platform::windows_in_z_order().into_iter().next());
+        // A minimised window is already out of the shot and must not be
+        // pulled back onto the screen afterwards.
+        let on_screen = self.visible && !self.minimized;
         self.pending = Some(Pending {
             mode,
-            was_visible: self.visible,
-            hiding: self.visible && self.config.overlay.hide_self,
+            restore: self.where_the_window_belongs(),
+            hiding: on_screen && self.config.overlay.hide_self,
             front_window,
         });
     }
@@ -344,7 +368,7 @@ impl App {
         }
     }
 
-    pub fn apply_settings(&mut self) {
+    pub fn apply_settings(&mut self, ctx: &egui::Context) {
         let folder_changed = self.draft.folder != self.config.folder;
         let hotkeys_changed = self.draft.hotkeys != self.config.hotkeys;
         let theme_changed = self.draft.ui.theme != self.config.ui.theme
@@ -367,7 +391,11 @@ impl App {
         if folder_changed {
             self.refresh();
         }
-        let _ = theme_changed;
+        if theme_changed {
+            // egui caches the whole style, so the new colours only reach
+            // buttons and panels once it is handed a new one.
+            ui::theme::apply(ctx, self.config.ui.theme, self.config.ui.accent);
+        }
         self.note("Settings saved");
     }
 
@@ -398,8 +426,37 @@ impl App {
         self.centred = true;
     }
 
+    fn where_the_window_belongs(&self) -> Restore {
+        if !self.visible {
+            Restore::Hidden
+        } else if self.minimized {
+            Restore::Minimized
+        } else {
+            Restore::Shown
+        }
+    }
+
+    /// Put the window back the way it was before a capture.
+    fn restore_window(&mut self, ctx: &egui::Context, restore: Restore) {
+        match restore {
+            Restore::Shown => self.show_window(ctx),
+            Restore::Minimized => {
+                // Visible and minimised: on the task bar, off the screen.
+                self.visible = true;
+                self.minimized = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
+            Restore::Hidden => self.hide_window(ctx),
+        }
+    }
+
     fn show_window(&mut self, ctx: &egui::Context) {
         self.visible = true;
+        self.minimized = false;
+        // Minimised and hidden are different states, and the window can be in
+        // either one when a shortcut or the tray asks for it back.
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
@@ -443,9 +500,7 @@ impl App {
             Ok(result) => result,
             Err(e) => {
                 self.warn(format!("The screen could not be read: {e}"));
-                if pending.was_visible {
-                    self.show_window(ctx);
-                }
+                self.restore_window(ctx, pending.restore);
                 return;
             }
         };
@@ -453,9 +508,7 @@ impl App {
         match pending.mode {
             Mode::Fullscreen => {
                 self.store(&image, None);
-                if pending.was_visible {
-                    self.show_window(ctx);
-                }
+                self.restore_window(ctx, pending.restore);
             }
             Mode::ActiveWindow => {
                 match pending.front_window {
@@ -471,9 +524,7 @@ impl App {
                     }
                     None => self.warn("No window is in front"),
                 }
-                if pending.was_visible {
-                    self.show_window(ctx);
-                }
+                self.restore_window(ctx, pending.restore);
             }
             Mode::Region => {
                 let windows = platform::windows_in_z_order();
@@ -484,7 +535,7 @@ impl App {
                     self.config.overlay.clone(),
                     self.config.ui.accent.rgb(),
                 );
-                self.enter_overlay(ctx, overlay, pending.was_visible);
+                self.enter_overlay(ctx, overlay, pending.restore);
             }
         }
     }
@@ -521,12 +572,15 @@ impl App {
     /// application is in exactly that state when the hotkey arrives. Reusing
     /// the one window keeps the overlay working from the tray either way, and
     /// saves a second GL surface.
-    fn enter_overlay(&mut self, ctx: &egui::Context, overlay: Overlay, restore_visible: bool) {
+    fn enter_overlay(&mut self, ctx: &egui::Context, overlay: Overlay, restore: Restore) {
         let screen = overlay.screen;
         let points = ctx.pixels_per_point().max(0.1);
+        // Saved before anything moves, so there is something to come back to.
+        self.saved_placement = platform::save_window_placement();
         self.overlay = Some(overlay);
-        self.overlay_restore = restore_visible;
+        self.overlay_restore = restore;
 
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
             egui::WindowLevel::AlwaysOnTop,
@@ -542,6 +596,7 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         self.visible = true;
+        self.minimized = false;
         ctx.request_repaint();
     }
 
@@ -552,16 +607,20 @@ impl App {
             egui::WindowLevel::Normal,
         ));
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
-        if let Some((position, size)) = self.last_geometry {
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(position));
+
+        let restore = self.overlay_restore;
+        match self.saved_placement.take() {
+            // The decorations only come back at the end of this pass, so the
+            // placement is applied on the next one.
+            Some(placement) => self.deferred_placement = Some((placement, restore)),
+            None => {
+                if let Some((position, size)) = self.last_geometry {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(position));
+                }
+                self.restore_window(ctx, restore);
+            }
         }
-        let visible = self.overlay_restore;
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(visible));
-        if visible {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-        }
-        self.visible = visible;
         ctx.request_repaint();
     }
 
@@ -639,6 +698,25 @@ impl eframe::App for App {
     /// Runs even while the window is hidden, which is where a tray application
     /// spends most of its life.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if let Some((placement, restore)) = self.deferred_placement.take() {
+            if platform::restore_window_placement(&placement) {
+                self.visible = restore != Restore::Hidden;
+                self.minimized = restore == Restore::Minimized;
+            } else {
+                if let Some((position, size)) = self.last_geometry {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(position));
+                }
+                self.restore_window(ctx, restore);
+            }
+        }
+
+        // The user can minimise at any time without telling the program, so
+        // this is read rather than remembered.
+        if self.overlay.is_none() && self.pending.is_none() {
+            self.minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+        }
+
         if self.show_requested.swap(false, Ordering::SeqCst) {
             self.refresh();
             self.show_window(ctx);

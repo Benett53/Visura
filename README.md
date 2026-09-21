@@ -13,9 +13,10 @@ on the clipboard, and the window keeps the last few within reach.
 
 ## Features
 
-- Region, window and full screen capture on a global shortcut
-- Selection overlay on a frozen frame, with window outlining, crosshair and an
-  optional magnifier with a colour readout
+- Region, window and full screen capture on a global shortcut, working
+  whatever the window is doing, including minimised
+- Selection overlay on a frozen frame: the window under the cursor gets a
+  moving dashed outline that travels to the next one instead of jumping
 - File names built from the program and the date, for example
   `Firefox_2026-09-21.png`, or random characters when names should say nothing
 - Recent shots in the main window, the full library in a separate window with
@@ -95,8 +96,10 @@ and the file name are patterns:
 A token with nothing to fill in leaves no gap: a full screen shot has no
 program, so `%app_%Y-%m-%d` becomes just the date.
 
-Anonymous names replace the pattern with twelve random characters and skip the
-dated subfolder, so neither the name nor the path says what was captured.
+Anonymous names replace the pattern with twelve random characters. The folders
+stay as they are, so a shot is still easy to find by when it was taken; it is
+the file name that stops saying what it is. Nothing is written into the file
+either: neither encoder emits a timestamp, a comment or EXIF.
 
 There is no index and no database. Whatever happens to the folder in a file
 manager is what the list shows next time it reads it.

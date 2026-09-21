@@ -48,9 +48,10 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GWL_EXSTYLE, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowLongW,
-    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
-    IsWindowVisible, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-    SW_SHOWNORMAL, WS_EX_TOOLWINDOW,
+    GetWindowPlacement, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId, IsIconic, IsWindowVisible, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOWNORMAL, SetWindowPlacement, WINDOWPLACEMENT,
+    WS_EX_TOOLWINDOW,
 };
 use windows::core::{BOOL, HRESULT, PCWSTR, PWSTR, implement};
 
@@ -393,6 +394,39 @@ pub fn disable_window_animations() {
             size_of::<BOOL>() as u32,
         );
     }
+}
+
+/// Everything Windows needs to put a window back exactly where it was,
+/// including whether it was minimised at the time.
+pub struct Placement(WINDOWPLACEMENT);
+
+// The struct is plain data; only the handle it is applied to is thread bound.
+unsafe impl Send for Placement {}
+
+/// Remember the window position before the overlay takes the window over.
+///
+/// Sending a size, a position and a minimise as three separate commands does
+/// not survive the round trip: Windows only records a normal position for a
+/// window that is not minimised at that moment, so the position is lost and
+/// the window comes back as a stub in the corner. A placement carries both at
+/// once and is what this is for.
+pub fn save_window_placement() -> Option<Placement> {
+    let hwnd = own_window()?;
+    unsafe {
+        let mut placement = WINDOWPLACEMENT {
+            length: size_of::<WINDOWPLACEMENT>() as u32,
+            ..Default::default()
+        };
+        GetWindowPlacement(hwnd, &mut placement).ok()?;
+        Some(Placement(placement))
+    }
+}
+
+pub fn restore_window_placement(placement: &Placement) -> bool {
+    let Some(hwnd) = own_window() else {
+        return false;
+    };
+    unsafe { SetWindowPlacement(hwnd, &placement.0).is_ok() }
 }
 
 /// Whether our own window is still on screen. The capture waits for this to

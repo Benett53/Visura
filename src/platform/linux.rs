@@ -154,6 +154,18 @@ fn keycode_for(d: &Display, keysym: u32) -> Option<u8> {
         .map(|i| first + i as u8)
 }
 
+/// X11 has no equivalent of a window placement, so the caller falls back to
+/// setting size, position and visibility one command at a time.
+pub struct Placement;
+
+pub fn save_window_placement() -> Option<Placement> {
+    None
+}
+
+pub fn restore_window_placement(_placement: &Placement) -> bool {
+    false
+}
+
 /// X11 hides a window synchronously and has no open or close animation, so
 /// the two helpers the Windows backend needs for that have no counterpart.
 ///

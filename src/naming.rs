@@ -173,15 +173,16 @@ pub fn target_path(
     anonymous: bool,
     ctx: &Context<'_>,
 ) -> PathBuf {
+    // The folder structure stays either way. Anonymous is about what a
+    // file name gives away to whoever ends up looking at the file, not
+    // about hiding the library from its owner, who still wants to find
+    // last month's shots.
     let mut dir = root.to_path_buf();
-    if !anonymous {
-        // An anonymous name in a folder called 2026-09 would still say when.
-        let sub = expand(subfolder_pattern, ctx);
-        for part in sub.split(['/', '\\']) {
-            let part = sanitise(part);
-            if !part.is_empty() {
-                dir.push(part);
-            }
+    let sub = expand(subfolder_pattern, ctx);
+    for part in sub.split(['/', '\\']) {
+        let part = sanitise(part);
+        if !part.is_empty() {
+            dir.push(part);
         }
     }
 
@@ -305,11 +306,14 @@ mod tests {
     }
 
     #[test]
-    fn anonymous_paths_skip_the_dated_subfolder() {
+    fn anonymous_names_keep_the_dated_folder() {
         let root = std::env::temp_dir().join("visura-anon-test");
         let anon = target_path(&root, "%Y-%m", "%app_%Y-%m-%d", "png", true, &ctx());
-        assert_eq!(anon.parent().unwrap(), root);
-        let named = target_path(&root, "%Y-%m", "%app_%Y-%m-%d", "png", false, &ctx());
-        assert_eq!(named.parent().unwrap(), root.join("2026-03"));
+        assert_eq!(anon.parent().unwrap(), root.join("2026-03"));
+
+        let stem = anon.file_stem().unwrap().to_string_lossy().into_owned();
+        assert_eq!(stem.chars().count(), 12);
+        assert!(!stem.contains("notepad"));
+        assert!(!stem.contains("2026"));
     }
 }
