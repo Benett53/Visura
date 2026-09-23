@@ -132,6 +132,9 @@ pub struct Overlay {
     pub crosshair: bool,
     /// Outline the window under the cursor and capture it on a plain click.
     pub detect_windows: bool,
+    /// Within a window, outline a pane on its own where there is one, such as
+    /// a web page without the browser's tabs and address bar.
+    pub detect_areas: bool,
     pub show_hints: bool,
     /// Hide the Visura window before capturing so it stays out of the shot.
     pub hide_self: bool,
@@ -144,6 +147,7 @@ impl Default for Overlay {
             magnifier: false,
             crosshair: true,
             detect_windows: true,
+            detect_areas: true,
             show_hints: false,
             hide_self: false,
         }
@@ -156,6 +160,9 @@ pub struct AfterCapture {
     pub copy_image: bool,
     pub copy_path: bool,
     pub open_folder: bool,
+    /// Move every shot taken since Visura started to the recycle bin when it
+    /// quits. For screenshots that only exist to be pasted somewhere once.
+    pub delete_on_exit: bool,
 }
 
 impl Default for AfterCapture {
@@ -165,6 +172,7 @@ impl Default for AfterCapture {
             copy_image: true,
             copy_path: false,
             open_folder: false,
+            delete_on_exit: false,
         }
     }
 }

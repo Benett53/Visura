@@ -46,6 +46,16 @@ pub struct Overlay {
     /// The outline being drawn right now, in physical pixels but kept as
     /// floats so it can travel to a new window instead of jumping there.
     outline: Option<[f32; 4]>,
+    /// Frames in a row in which the window did not cover the screen.
+    unsettled_frames: u32,
+    /// Ctrl is held: take the whole window even where a pane is outlined.
+    /// Some programs put their title bar inside a pane, and without this the
+    /// window as a whole would be out of reach there.
+    whole_window: bool,
+    /// Button state last frame, to turn the polled state into presses and
+    /// releases.
+    primary_was_down: bool,
+    secondary_was_down: bool,
     accent: Color32,
     config: OverlayConfig,
 }
@@ -58,6 +68,9 @@ impl Overlay {
         config: OverlayConfig,
         accent: [u8; 3],
     ) -> Self {
+        // Whatever is held right now (the click on "Capture region", say)
+        // belongs to what opened the overlay, not to the selection.
+        let (primary_was_down, secondary_was_down) = crate::platform::mouse_buttons();
         Self {
             image,
             screen,
@@ -71,6 +84,10 @@ impl Overlay {
             // until the user moves the mouse.
             cursor: crate::platform::cursor_position(),
             outline: None,
+            unsettled_frames: 0,
+            whole_window: false,
+            primary_was_down,
+            secondary_was_down,
             accent: Color32::from_rgb(accent[0], accent[1], accent[2]),
             config,
         }
@@ -86,6 +103,25 @@ impl Overlay {
         self.windows
             .iter()
             .find(|w| w.rect.contains(self.cursor.0, self.cursor.1))
+    }
+
+    /// The window under the cursor together with what a click would take: a
+    /// pane inside it such as a web page, or the window as a whole.
+    fn target_under_cursor(&self) -> Option<(WindowInfo, Rect)> {
+        let window = self.window_under_cursor()?;
+        let use_areas = self.config.detect_areas && !self.whole_window;
+        let target = window.target_at(self.cursor.0, self.cursor.1, use_areas);
+        Some((window.clone(), target))
+    }
+
+    /// Whether the window should be asked again to cover the screen.
+    ///
+    /// Normally the first request is enough. If the window ended up a
+    /// different size anyway, repeating the request every few frames puts it
+    /// back instead of leaving the overlay stuck in a state where a click
+    /// cannot be trusted.
+    pub fn wants_geometry(&self) -> bool {
+        self.unsettled_frames > 0 && self.unsettled_frames % 15 == 0
     }
 
     /// The top most window containing a point, for naming the saved file.
@@ -115,14 +151,46 @@ impl Overlay {
         ui.allocate_rect(area, Sense::click_and_drag());
         let painter = ui.painter().clone();
 
+        // The mouse comes straight from the system, every frame. Through egui a
+        // click only arrives once egui has seen the pointer move, so a click
+        // without moving the mouse first was lost and the overlay sat there
+        // looking frozen. The position is physical pixels already.
+        let (primary, secondary) = crate::platform::mouse_buttons();
+        let pressed = primary && !self.primary_was_down;
+        let released = !primary && self.primary_was_down;
+        let secondary_pressed = secondary && !self.secondary_was_down;
+        self.primary_was_down = primary;
+        self.secondary_was_down = secondary;
+        self.cursor = crate::platform::cursor_position();
+
+        // Leaving must work in every state, so it is checked before anything
+        // that could stall.
+        let (escape, space) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::Escape),
+                i.key_pressed(egui::Key::Space),
+            )
+        });
+        if escape || secondary_pressed {
+            return Outcome::Cancelled;
+        }
+        if space {
+            return Outcome::Selected(self.screen);
+        }
+
         // The window is asked to cover the whole desktop, but the window
         // manager needs a frame or two to comply. Until the size matches,
-        // the frozen frame is shown and input is ignored, so an early click
-        // cannot land on the wrong pixels.
+        // the frozen frame is shown and pointer input is ignored, so an early
+        // click cannot land on the wrong pixels.
         let points = ui.ctx().pixels_per_point();
         let settled = (area.width() * points - self.screen.w as f32).abs() <= 3.0
             && (area.height() * points - self.screen.h as f32).abs() <= 3.0;
         if !settled {
+            self.unsettled_frames += 1;
+            // A press that began before the window was in place is dropped,
+            // not carried over into a click on pixels nobody saw yet.
+            self.drag_start = None;
+            self.dragged = false;
             painter.image(
                 texture_id,
                 area,
@@ -131,34 +199,16 @@ impl Overlay {
             );
             return Outcome::Pending;
         }
+        self.unsettled_frames = 0;
+        self.whole_window = crate::platform::ctrl_key_down();
 
         // The window is meant to cover the whole virtual desktop, but its real
         // size is whatever the window manager granted. Mapping from the actual
-        // rectangle keeps the selection exact either way.
+        // rectangle keeps the drawing exact either way.
         let map = Mapping::new(area, self.screen);
 
-        if let Some(p) = ctx.input(|i| i.pointer.latest_pos()) {
-            self.cursor = map.to_physical(p);
-        }
-
         // ------------------------------------------------------- input ----
-        let (pressed, released, secondary, escape, space, enter) = ctx.input(|i| {
-            (
-                i.pointer.primary_pressed(),
-                i.pointer.primary_released(),
-                i.pointer.secondary_pressed(),
-                i.key_pressed(egui::Key::Escape),
-                i.key_pressed(egui::Key::Space),
-                i.key_pressed(egui::Key::Enter),
-            )
-        });
-
-        if escape || secondary {
-            return Outcome::Cancelled;
-        }
-        if space {
-            return Outcome::Selected(self.screen);
-        }
+        let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
 
         if pressed {
             self.drag_start = Some(self.cursor);
@@ -176,29 +226,29 @@ impl Overlay {
             .filter(|_| self.dragged)
             .map(|start| Rect::from_corners(start, self.cursor));
 
-        if released {
-            let start = self.drag_start.take();
-            if self.dragged {
-                if let Some(start) = start {
-                    let region = Rect::from_corners(start, self.cursor).intersect(&self.screen);
-                    self.dragged = false;
-                    if region.w >= 2 && region.h >= 2 {
-                        return Outcome::Selected(region);
-                    }
+        // Only a release whose press was seen here counts. Otherwise the tail
+        // of the click that opened the overlay could select something.
+        if released && let Some(start) = self.drag_start.take() {
+            let dragged = std::mem::take(&mut self.dragged);
+            if dragged {
+                let region = Rect::from_corners(start, self.cursor).intersect(&self.screen);
+                if region.w >= 2 && region.h >= 2 {
+                    return Outcome::Selected(region);
                 }
-            } else if let Some(window) = self.window_under_cursor() {
-                // A plain click takes the highlighted window.
-                return Outcome::Selected(window.rect);
+            } else if let Some((_, target)) = self.target_under_cursor() {
+                // A plain click takes whatever is outlined.
+                return Outcome::Selected(target);
             }
-            self.dragged = false;
         }
 
         let hovered = if selection.is_none() {
-            self.window_under_cursor().cloned()
+            self.target_under_cursor()
         } else {
             None
         };
-        if enter && let Some(region) = selection.or_else(|| hovered.as_ref().map(|w| w.rect)) {
+        if enter
+            && let Some(region) = selection.or_else(|| hovered.as_ref().map(|(_, target)| *target))
+        {
             return Outcome::Selected(region);
         }
 
@@ -213,7 +263,7 @@ impl Overlay {
         // The outline eases across to a new window rather than jumping, which
         // makes it obvious that one outline moved instead of two blinking.
         let (delta, time) = ui.input(|i| (i.stable_dt.clamp(0.0, 0.1), i.time));
-        self.outline = match hovered.as_ref().map(|w| w.rect) {
+        self.outline = match hovered.as_ref().map(|(_, target)| *target) {
             Some(target) if selection.is_none() => {
                 let goal = [
                     target.x as f32,
@@ -266,7 +316,7 @@ impl Overlay {
             // A detected window is outlined instead. Cutting it out of the
             // dimming made it hard to tell where the edge actually ran; a line
             // drawn on the edge says exactly what a click would take.
-            (None, Some(window)) => {
+            (None, Some((window, target))) => {
                 painter.rect_filled(area, 0.0, dim);
                 if let Some(current) = self.outline {
                     let outline = UiRect::from_min_max(
@@ -274,7 +324,7 @@ impl Overlay {
                         map.to_ui_exact(current[0] + current[2], current[1] + current[3]),
                     );
                     self.draw_marching_ants(&painter, outline, time);
-                    self.draw_readout(&painter, outline, window.rect, Some(window));
+                    self.draw_readout(&painter, outline, *target, Some(window));
                 }
             }
             (None, None) => {
@@ -450,7 +500,9 @@ impl Overlay {
     }
 
     fn draw_hints(&self, painter: &egui::Painter, area: UiRect) {
-        let hint = if self.config.detect_windows {
+        let hint = if self.config.detect_windows && self.config.detect_areas {
+            "Drag: region   ·   Click: outlined part   ·   Ctrl: whole window   ·   Space: whole screen   ·   Esc: cancel"
+        } else if self.config.detect_windows {
             "Drag: region   ·   Click: window   ·   Space: whole screen   ·   Esc: cancel"
         } else {
             "Drag: region   ·   Space: whole screen   ·   Esc: cancel"
@@ -492,6 +544,9 @@ impl Mapping {
         Self { area, screen }
     }
 
+    /// The inverse of `to_ui`. The pointer now comes from the system in
+    /// physical pixels, so this is only needed to check `to_ui` against.
+    #[cfg(test)]
     fn to_physical(&self, p: Pos2) -> (i32, i32) {
         let fx = ((p.x - self.area.min.x) / self.area.width().max(1.0)).clamp(0.0, 1.0);
         let fy = ((p.y - self.area.min.y) / self.area.height().max(1.0)).clamp(0.0, 1.0);

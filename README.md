@@ -17,12 +17,16 @@ on the clipboard, and the window keeps the last few within reach.
   whatever the window is doing, including minimised
 - Selection overlay on a frozen frame: the window under the cursor gets a
   moving dashed outline that travels to the next one instead of jumping
+- Panes inside a window are outlined on their own where the program has them,
+  for example the page in Chromium based browsers and Electron apps without
+  the tabs and address bar around it
 - File names built from the program and the date, for example
   `Firefox_2026-09-21.png`, or random characters when names should say nothing
 - Recent shots in the main window, the full library in a separate window with
   search and day headings
 - Drag a shot out of the list into another program
 - Delete moves to the recycle bin
+- Optionally, shots taken in a session go to the recycle bin when Visura quits
 - Dark, black and light themes, seven accents
 
 No upload, no account, no sharing, no image editor. Screenshots go into a
@@ -57,7 +61,8 @@ In the overlay:
 | Action | How |
 |---|---|
 | Free region | Drag |
-| A whole window | Move the mouse over it and click the outline |
+| A window or pane | Move the mouse over it and click the outline |
+| The whole window around a pane | Hold `Ctrl` and click |
 | Everything | `Space` |
 | Take the current outline | `Enter` |
 | Cancel | `Esc` or right-click |
@@ -123,6 +128,7 @@ autostart = false
 copy_image = true
 copy_path = false
 open_folder = false
+delete_on_exit = false
 
 [hotkeys]
 region = "PrintScreen"
@@ -134,6 +140,7 @@ dim = 0.55
 magnifier = false
 crosshair = true
 detect_windows = true
+detect_areas = true
 show_hints = false
 hide_self = false
 

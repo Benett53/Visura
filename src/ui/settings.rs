@@ -190,6 +190,19 @@ impl App {
                 &mut self.draft.after.open_folder,
                 "Show it in the file manager",
             );
+            ui.add_space(6.0);
+            ui.checkbox(
+                &mut self.draft.after.delete_on_exit,
+                "Delete this session's screenshots when Visura quits",
+            );
+            ui.label(
+                RichText::new(
+                    "    For shots that only exist to be pasted once. They go to the \
+                     recycle bin, so a mistake can still be undone.",
+                )
+                .color(palette.muted)
+                .size(11.5),
+            );
         });
     }
 
@@ -282,6 +295,12 @@ impl App {
                 &mut self.draft.overlay.detect_windows,
                 "Outline the window under the cursor",
             );
+            ui.add_enabled_ui(self.draft.overlay.detect_windows, |ui| {
+                ui.checkbox(
+                    &mut self.draft.overlay.detect_areas,
+                    "Outline panes inside a window, such as a web page without the browser",
+                );
+            });
             ui.checkbox(&mut self.draft.overlay.crosshair, "Crosshair");
             ui.checkbox(
                 &mut self.draft.overlay.magnifier,

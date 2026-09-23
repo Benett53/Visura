@@ -98,6 +98,9 @@ pub struct App {
     /// Applied one pass after the overlay closes, once the window has its
     /// decorations back.
     deferred_placement: Option<(platform::Placement, Restore)>,
+    /// Every file saved since Visura started, for deleting them on quit when
+    /// that is switched on. Kept up to date when one is renamed.
+    session_shots: Vec<PathBuf>,
     /// The window is put in the middle of the screen once, on the first frame,
     /// when its real size is known.
     centred: bool,
@@ -167,6 +170,7 @@ impl App {
             overlay_restore: Restore::Hidden,
             saved_placement: None,
             deferred_placement: None,
+            session_shots: Vec::new(),
             centred: false,
             history_open: false,
             recording: None,
@@ -264,6 +268,9 @@ impl App {
         // A minimised window is already out of the shot and must not be
         // pulled back onto the screen afterwards.
         let on_screen = self.visible && !self.minimized;
+        // Taken before anything is hidden or moved: where the window was, what
+        // it sat under, and which window had the keyboard.
+        self.saved_placement = platform::save_window_placement();
         self.pending = Some(Pending {
             mode,
             restore: self.where_the_window_belongs(),
@@ -361,6 +368,12 @@ impl App {
             Ok(()) => {
                 self.thumbs.forget(&path);
                 self.selection.remove(&path);
+                // A renamed shot is still one from this session.
+                for shot in &mut self.session_shots {
+                    if *shot == path {
+                        *shot = target.clone();
+                    }
+                }
                 self.selection.insert(target);
                 self.refresh();
             }
@@ -436,10 +449,44 @@ impl App {
         }
     }
 
-    /// Put the window back the way it was before a capture.
+    /// Finish a capture: put the window back the way it was, if the capture
+    /// changed anything about it.
+    ///
+    /// A window that was neither hidden nor turned into the overlay is left
+    /// completely alone. It used to be brought to the front after every shot,
+    /// which pulled a window sitting in the background into view.
+    fn finish_capture(&mut self, ctx: &egui::Context, restore: Restore, touched: bool) {
+        let placement = self.saved_placement.take();
+        if !touched {
+            return;
+        }
+        match placement {
+            // Applied on the next pass, once any change of decorations or
+            // window level from this one has reached the window.
+            Some(placement) => self.deferred_placement = Some((placement, restore)),
+            None => {
+                if let Some((position, size)) = self.last_geometry {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(position));
+                }
+                self.restore_window(ctx, restore);
+            }
+        }
+        ctx.request_repaint();
+    }
+
+    /// Put the window back the way it was before a capture. The fallback for
+    /// platforms without a window placement.
     fn restore_window(&mut self, ctx: &egui::Context, restore: Restore) {
         match restore {
-            Restore::Shown => self.show_window(ctx),
+            Restore::Shown => {
+                self.visible = true;
+                self.minimized = false;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                // No focus: putting a window back is not a reason to put it
+                // in front.
+            }
             Restore::Minimized => {
                 // Visible and minimised: on the task bar, off the screen.
                 self.visible = true;
@@ -500,7 +547,7 @@ impl App {
             Ok(result) => result,
             Err(e) => {
                 self.warn(format!("The screen could not be read: {e}"));
-                self.restore_window(ctx, pending.restore);
+                self.finish_capture(ctx, pending.restore, pending.hiding);
                 return;
             }
         };
@@ -508,7 +555,7 @@ impl App {
         match pending.mode {
             Mode::Fullscreen => {
                 self.store(&image, None);
-                self.restore_window(ctx, pending.restore);
+                self.finish_capture(ctx, pending.restore, pending.hiding);
             }
             Mode::ActiveWindow => {
                 match pending.front_window {
@@ -524,7 +571,7 @@ impl App {
                     }
                     None => self.warn("No window is in front"),
                 }
-                self.restore_window(ctx, pending.restore);
+                self.finish_capture(ctx, pending.restore, pending.hiding);
             }
             Mode::Region => {
                 let windows = platform::windows_in_z_order();
@@ -557,6 +604,7 @@ impl App {
                 self.today = platform::local_now();
                 self.refresh();
                 self.selection.clear();
+                self.session_shots.push(outcome.path.clone());
                 self.selection.insert(outcome.path);
             }
             Err(e) => self.warn(e),
@@ -574,17 +622,26 @@ impl App {
     /// saves a second GL surface.
     fn enter_overlay(&mut self, ctx: &egui::Context, overlay: Overlay, restore: Restore) {
         let screen = overlay.screen;
-        let points = ctx.pixels_per_point().max(0.1);
-        // Saved before anything moves, so there is something to come back to.
-        self.saved_placement = platform::save_window_placement();
         self.overlay = Some(overlay);
         self.overlay_restore = restore;
+        platform::set_overlay_active(true);
 
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
             egui::WindowLevel::AlwaysOnTop,
         ));
+        Self::cover_screen(ctx, screen);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        self.visible = true;
+        self.minimized = false;
+        ctx.request_repaint();
+    }
+
+    /// Make the window cover exactly the given part of the desktop.
+    fn cover_screen(ctx: &egui::Context, screen: platform::Rect) {
+        let points = ctx.pixels_per_point().max(0.1);
         ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
             screen.x as f32 / points,
             screen.y as f32 / points,
@@ -593,35 +650,18 @@ impl App {
             screen.w as f32 / points,
             screen.h as f32 / points,
         )));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-        self.visible = true;
-        self.minimized = false;
-        ctx.request_repaint();
     }
 
     fn leave_overlay(&mut self, ctx: &egui::Context) {
+        platform::set_overlay_active(false);
         self.overlay = None;
         self.pending = None;
         ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
             egui::WindowLevel::Normal,
         ));
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
-
         let restore = self.overlay_restore;
-        match self.saved_placement.take() {
-            // The decorations only come back at the end of this pass, so the
-            // placement is applied on the next one.
-            Some(placement) => self.deferred_placement = Some((placement, restore)),
-            None => {
-                if let Some((position, size)) = self.last_geometry {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(position));
-                }
-                self.restore_window(ctx, restore);
-            }
-        }
-        ctx.request_repaint();
+        self.finish_capture(ctx, restore, true);
     }
 
     fn overlay_ui(&mut self, ui: &mut egui::Ui) {
@@ -631,6 +671,9 @@ impl App {
         };
         let outcome = overlay.ui(ui);
         ctx.request_repaint();
+        if overlay.wants_geometry() {
+            Self::cover_screen(&ctx, overlay.screen);
+        }
 
         match outcome {
             overlay::Outcome::Pending => self.overlay = Some(overlay),
@@ -699,7 +742,9 @@ impl eframe::App for App {
     /// spends most of its life.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if let Some((placement, restore)) = self.deferred_placement.take() {
-            if platform::restore_window_placement(&placement) {
+            let shown = restore != Restore::Hidden;
+            let minimized = restore == Restore::Minimized;
+            if platform::restore_window_placement(&placement, shown, minimized) {
                 self.visible = restore != Restore::Hidden;
                 self.minimized = restore == Restore::Minimized;
             } else {
@@ -796,6 +841,22 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if self.config.after.delete_on_exit {
+            // Only files that are still there: the user may have deleted or
+            // moved some already, and the recycle bin refuses the whole batch
+            // when a single path is missing.
+            let leftover: Vec<PathBuf> = self
+                .session_shots
+                .iter()
+                .filter(|path| path.exists())
+                .cloned()
+                .collect();
+            if !leftover.is_empty() && library::delete(&leftover).is_ok() {
+                library::prune_empty_dirs(&self.config.folder);
+                self.shots = library::scan(&self.config.folder);
+            }
+        }
+
         let known: HashSet<u64> = self
             .shots
             .iter()

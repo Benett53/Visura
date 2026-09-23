@@ -98,7 +98,43 @@ pub fn work_area_at_cursor() -> Rect {
     whole
 }
 
+/// Modifier and button state of the pointer, as the X server reports it.
+fn pointer_mask() -> u16 {
+    let Some(d) = display() else {
+        return 0;
+    };
+    d.conn
+        .query_pointer(d.root)
+        .ok()
+        .and_then(|c| c.reply().ok())
+        .map(|p| u16::from(p.mask))
+        .unwrap_or(0)
+}
+
+/// The primary and secondary mouse button. The server applies any button
+/// swap before reporting, so button one is always the primary one.
+///
+/// The overlay reads the buttons here rather than through egui. egui only
+/// passes a click on once it knows where the pointer is, and it learns that
+/// from a mouse movement; an overlay that opens under a mouse that has not
+/// moved would otherwise swallow the click and look frozen.
+pub fn mouse_buttons() -> (bool, bool) {
+    const BUTTON1: u16 = 1 << 8;
+    const BUTTON3: u16 = 1 << 10;
+    let mask = pointer_mask();
+    (mask & BUTTON1 != 0, mask & BUTTON3 != 0)
+}
+
+/// Whether a Ctrl key is held, read the same way as the mouse buttons.
+pub fn ctrl_key_down() -> bool {
+    const CONTROL: u16 = 1 << 2;
+    pointer_mask() & CONTROL != 0
+}
+
 /// Whether a Super key is held. egui has no modifier for it.
+/// Only Windows needs telling; see the Windows version.
+pub fn set_overlay_active(_active: bool) {}
+
 pub fn super_key_down() -> bool {
     let Some(d) = display() else {
         return false;
@@ -162,7 +198,7 @@ pub fn save_window_placement() -> Option<Placement> {
     None
 }
 
-pub fn restore_window_placement(_placement: &Placement) -> bool {
+pub fn restore_window_placement(_placement: &Placement, _shown: bool, _minimized: bool) -> bool {
     false
 }
 
@@ -433,7 +469,14 @@ fn describe_window(
         })
         .unwrap_or_default();
 
-    Some(WindowInfo { rect, title, app })
+    // X11 child windows are mostly the toolkit's own business and say little
+    // about what is on screen, so no panes are offered here.
+    Some(WindowInfo {
+        rect,
+        title,
+        app,
+        areas: Vec::new(),
+    })
 }
 
 pub fn foreground_window() -> Option<WindowInfo> {

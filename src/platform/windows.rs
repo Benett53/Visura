@@ -4,11 +4,12 @@
 use std::ffi::OsString;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::time::SystemTime;
 
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, FILETIME, HANDLE, HWND, LPARAM, MAX_PATH, POINT, RECT,
+    CloseHandle, ERROR_ALREADY_EXISTS, FILETIME, HANDLE, HWND, LPARAM, LRESULT, MAX_PATH, POINT,
+    RECT, WPARAM,
 };
 use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_TRANSITIONS_FORCEDISABLED,
@@ -41,17 +42,19 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
-    BHID_DataObject, FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_SILENT, FOS_PICKFOLDERS,
-    FileOpenDialog, IFileOpenDialog, IShellItem, IShellItemArray, SHCreateItemFromParsingName,
-    SHCreateShellItemArrayFromIDLists, SHFILEOPSTRUCTW, SHFileOperationW, SHParseDisplayName,
-    SIGDN_FILESYSPATH, ShellExecuteW,
+    BHID_DataObject, DefSubclassProc, FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_SILENT,
+    FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, IShellItem, IShellItemArray,
+    SHCreateItemFromParsingName, SHCreateShellItemArrayFromIDLists, SHFILEOPSTRUCTW,
+    SHFileOperationW, SHParseDisplayName, SIGDN_FILESYSPATH, SetWindowSubclass, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GWL_EXSTYLE, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowLongW,
-    GetWindowPlacement, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, IsIconic, IsWindowVisible, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOWNORMAL, SetWindowPlacement, WINDOWPLACEMENT,
-    WS_EX_TOOLWINDOW,
+    EnumChildWindows, EnumWindows, GW_HWNDPREV, GWL_EXSTYLE, GetCursorPos, GetForegroundWindow,
+    GetSystemMetrics, GetWindow, GetWindowLongW, GetWindowPlacement, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, HTCLIENT, IsIconic, IsWindow,
+    IsWindowVisible, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    SW_HIDE, SW_SHOWMAXIMIZED, SW_SHOWMINIMIZED, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow, SetWindowPlacement, SetWindowPos, WINDOWPLACEMENT,
+    WM_NCHITTEST, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
 };
 use windows::core::{BOOL, HRESULT, PCWSTR, PWSTR, implement};
 
@@ -192,6 +195,36 @@ pub fn work_area_at_cursor() -> Rect {
     }
 }
 
+/// The primary and secondary mouse button, as the user has them set up: with
+/// the buttons swapped for left handed use, primary is the physical right one.
+///
+/// The overlay reads the buttons here rather than through egui. egui only
+/// passes a click on once it knows where the pointer is, and it learns that
+/// from a mouse movement; an overlay that opens under a mouse that has not
+/// moved would otherwise swallow the click and look frozen.
+pub fn mouse_buttons() -> (bool, bool) {
+    unsafe {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_LBUTTON, VK_RBUTTON};
+        use windows::Win32::UI::WindowsAndMessaging::SM_SWAPBUTTON;
+        // GetAsyncKeyState reports the physical buttons.
+        let left = GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000 != 0;
+        let right = GetAsyncKeyState(VK_RBUTTON.0 as i32) as u16 & 0x8000 != 0;
+        if GetSystemMetrics(SM_SWAPBUTTON) != 0 {
+            (right, left)
+        } else {
+            (left, right)
+        }
+    }
+}
+
+/// Whether a Ctrl key is held, read the same way as the mouse buttons.
+pub fn ctrl_key_down() -> bool {
+    unsafe {
+        use windows::Win32::UI::Input::KeyboardAndMouse::VK_CONTROL;
+        GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000 != 0
+    }
+}
+
 /// Whether a Windows key is held. egui has no modifier for it.
 pub fn super_key_down() -> bool {
     unsafe {
@@ -323,8 +356,82 @@ unsafe fn describe_window(hwnd: HWND, collector: &Collector) -> Option<WindowInf
             rect,
             title,
             app: process_name(pid).unwrap_or_default(),
+            areas: child_areas(hwnd, rect),
         })
     }
+}
+
+/// Panes smaller than this are skipped. Below it the outline would jump onto
+/// every button and scroll bar, which is not what anyone hovering a window
+/// wants to capture.
+const MIN_AREA_WIDTH: i32 = 120;
+const MIN_AREA_HEIGHT: i32 = 80;
+/// A child reaching this close to every edge of its window is a container for
+/// the whole window, not a pane, and would only duplicate the outline.
+const FULL_COVER_MARGIN: i32 = 16;
+/// Enough for any real layout; stops a pathological window with thousands of
+/// children from slowing the overlay down.
+const MAX_AREAS: usize = 64;
+
+/// The child windows of a top level window that are worth offering as a
+/// capture target on their own.
+///
+/// Chromium based programs (Chrome, Edge, Brave, and every Electron app such
+/// as Discord or VS Code) put the web content into its own child window, which
+/// is what lets a page be taken without the browser around it. Programs that
+/// draw everything into one window simply have no such children, and the
+/// whole window is used.
+fn child_areas(hwnd: HWND, parent: Rect) -> Vec<Rect> {
+    struct Collect {
+        areas: Vec<Rect>,
+        parent: Rect,
+    }
+
+    unsafe extern "system" fn visit(child: HWND, param: LPARAM) -> BOOL {
+        let collect = unsafe { &mut *(param.0 as *mut Collect) };
+        if collect.areas.len() >= MAX_AREAS {
+            return false.into();
+        }
+        // Also false when any ancestor is hidden, which is what is wanted.
+        if !unsafe { IsWindowVisible(child) }.as_bool() {
+            return true.into();
+        }
+        let mut bounds = RECT::default();
+        if unsafe { GetWindowRect(child, &mut bounds) }.is_err() {
+            return true.into();
+        }
+        let parent = collect.parent;
+        let rect = Rect::new(
+            bounds.left,
+            bounds.top,
+            bounds.right - bounds.left,
+            bounds.bottom - bounds.top,
+        )
+        .intersect(&parent);
+
+        let big_enough = rect.w >= MIN_AREA_WIDTH && rect.h >= MIN_AREA_HEIGHT;
+        let covers_everything = (rect.x - parent.x).abs() <= FULL_COVER_MARGIN
+            && (rect.y - parent.y).abs() <= FULL_COVER_MARGIN
+            && (rect.right() - parent.right()).abs() <= FULL_COVER_MARGIN
+            && (rect.bottom() - parent.bottom()).abs() <= FULL_COVER_MARGIN;
+        if big_enough && !covers_everything && !collect.areas.contains(&rect) {
+            collect.areas.push(rect);
+        }
+        true.into()
+    }
+
+    let mut collect = Collect {
+        areas: Vec::new(),
+        parent,
+    };
+    unsafe {
+        let _ = EnumChildWindows(
+            Some(hwnd),
+            Some(visit),
+            LPARAM(&mut collect as *mut Collect as isize),
+        );
+    }
+    collect.areas
 }
 
 fn window_title(hwnd: HWND) -> String {
@@ -369,6 +476,42 @@ static MAIN_WINDOW: AtomicIsize = AtomicIsize::new(0);
 pub fn set_main_window(hwnd: isize) {
     MAIN_WINDOW.store(hwnd, Ordering::Relaxed);
     disable_window_animations();
+    unsafe {
+        let _ = SetWindowSubclass(
+            HWND(hwnd as *mut std::ffi::c_void),
+            Some(overlay_hit_test),
+            OVERLAY_SUBCLASS_ID,
+            0,
+        );
+    }
+}
+
+/// Set while the main window is the capture overlay.
+static OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
+const OVERLAY_SUBCLASS_ID: usize = 0x5649_5355;
+
+/// Tell the window whether it is the overlay right now.
+///
+/// While it is, every point of it is reported to Windows as ordinary client
+/// area. Otherwise Windows still treats the outermost pixels as a frame: a
+/// drag starting at the very edge of the screen moved or resized the overlay
+/// instead of selecting, and the program stopped reacting until it was killed.
+pub fn set_overlay_active(active: bool) {
+    OVERLAY_ACTIVE.store(active, Ordering::Relaxed);
+}
+
+unsafe extern "system" fn overlay_hit_test(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    if message == WM_NCHITTEST && OVERLAY_ACTIVE.load(Ordering::Relaxed) {
+        return LRESULT(HTCLIENT as isize);
+    }
+    unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
 }
 
 fn own_window() -> Option<HWND> {
@@ -396,37 +539,101 @@ pub fn disable_window_animations() {
     }
 }
 
-/// Everything Windows needs to put a window back exactly where it was,
-/// including whether it was minimised at the time.
-pub struct Placement(WINDOWPLACEMENT);
+/// Everything needed to put the window back exactly as it was before a
+/// capture: position and show state, where it sat in the stack of windows,
+/// and which window was in front.
+pub struct Placement {
+    window: WINDOWPLACEMENT,
+    /// The window directly above ours, so ours can go back underneath it.
+    above: isize,
+    /// Whoever had the keyboard, so they can have it back.
+    foreground: isize,
+}
 
-// The struct is plain data; only the handle it is applied to is thread bound.
+// Plain data; only the handles it names are tied to a thread.
 unsafe impl Send for Placement {}
 
-/// Remember the window position before the overlay takes the window over.
+/// Remember the window before a capture touches it.
 ///
 /// Sending a size, a position and a minimise as three separate commands does
 /// not survive the round trip: Windows only records a normal position for a
 /// window that is not minimised at that moment, so the position is lost and
 /// the window comes back as a stub in the corner. A placement carries both at
-/// once and is what this is for.
+/// once. The stacking order and the foreground window are kept alongside, so a
+/// window that was sitting in the background stays in the background.
 pub fn save_window_placement() -> Option<Placement> {
     let hwnd = own_window()?;
     unsafe {
-        let mut placement = WINDOWPLACEMENT {
+        let mut window = WINDOWPLACEMENT {
             length: size_of::<WINDOWPLACEMENT>() as u32,
             ..Default::default()
         };
-        GetWindowPlacement(hwnd, &mut placement).ok()?;
-        Some(Placement(placement))
+        GetWindowPlacement(hwnd, &mut window).ok()?;
+        let above = GetWindow(hwnd, GW_HWNDPREV)
+            .map(|h| h.0 as isize)
+            .unwrap_or(0);
+        let foreground = GetForegroundWindow().0 as isize;
+        Some(Placement {
+            window,
+            above,
+            foreground,
+        })
     }
 }
 
-pub fn restore_window_placement(placement: &Placement) -> bool {
+/// Put the window back without activating it, back into its old slot in the
+/// stack, and hand the keyboard back to whoever had it.
+pub fn restore_window_placement(placement: &Placement, shown: bool, minimized: bool) -> bool {
     let Some(hwnd) = own_window() else {
         return false;
     };
-    unsafe { SetWindowPlacement(hwnd, &placement.0).is_ok() }
+    unsafe {
+        let mut window = placement.window;
+        // The plain "show" commands activate the window, which is exactly
+        // what pulled a background window to the front after every shot.
+        window.showCmd = if !shown {
+            SW_HIDE.0 as u32
+        } else if minimized {
+            // Not SW_SHOWMINNOACTIVE: a window minimised that way comes back
+            // from the task bar as a 6x6 stub in the corner. A minimised window
+            // is not in anyone's way, and the keyboard is handed back below.
+            SW_SHOWMINIMIZED.0 as u32
+        } else if window.showCmd == SW_SHOWMAXIMIZED.0 as u32 {
+            SW_SHOWMAXIMIZED.0 as u32
+        } else {
+            SW_SHOWNOACTIVATE.0 as u32
+        };
+        if SetWindowPlacement(hwnd, &window).is_err() {
+            return false;
+        }
+
+        if shown && !minimized {
+            let above = HWND(placement.above as *mut std::ffi::c_void);
+            // Slotting in under a topmost window would make ours topmost as
+            // well; in that case it was at the top of the ordinary windows
+            // anyway, which is where the overlay left it.
+            let usable = placement.above != 0
+                && IsWindow(Some(above)).as_bool()
+                && (GetWindowLongW(above, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0) == 0;
+            if usable {
+                let _ = SetWindowPos(
+                    hwnd,
+                    Some(above),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            }
+        }
+
+        let foreground = HWND(placement.foreground as *mut std::ffi::c_void);
+        if placement.foreground != 0 && IsWindow(Some(foreground)).as_bool() {
+            let _ = SetForegroundWindow(foreground);
+        }
+        true
+    }
 }
 
 /// Whether our own window is still on screen. The capture waits for this to

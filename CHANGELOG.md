@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.1.2
+
+Fixed:
+
+- Dragging from the very edge of the screen grabbed the overlay's invisible
+  frame: the overlay moved or shrank into a picture of the desktop and the
+  program stopped responding. The overlay now reports its whole area as
+  content to Windows.
+- A window left in the background was brought to the front after every shot.
+  It now keeps its place in the window order, and the previously active
+  window gets the keyboard back.
+- A click in the overlay was lost when the mouse had not moved since the
+  overlay opened. Buttons are now read from the system.
+
+Added:
+
+- Panes inside a window are outlined separately, such as the page in Chromium
+  based browsers and Electron apps. `Ctrl` + click takes the whole window.
+  Programs that draw everything into one surface, such as Firefox, still get
+  the whole window. Setting: `detect_areas`.
+- Setting to move the shots of the current session to the recycle bin when
+  Visura quits (`delete_on_exit`, off by default).
+
 ## 0.1.1
 
 Fixed:

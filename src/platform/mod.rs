@@ -120,6 +120,28 @@ pub struct WindowInfo {
     pub title: String,
     /// Executable name without extension, used for the `%app` token.
     pub app: String,
+    /// Panes inside the window that are worth capturing on their own, such as
+    /// the page area of a browser without its tabs and address bar. Empty
+    /// where the platform cannot tell.
+    pub areas: Vec<Rect>,
+}
+
+impl WindowInfo {
+    /// What a click at this point should take: the smallest pane that
+    /// contains it, or the whole window when the point is on the frame, the
+    /// title bar or anywhere else outside a pane.
+    pub fn target_at(&self, x: i32, y: i32, use_areas: bool) -> Rect {
+        if use_areas {
+            self.areas
+                .iter()
+                .filter(|area| area.contains(x, y))
+                .min_by_key(|area| area.w as i64 * area.h as i64)
+                .copied()
+                .unwrap_or(self.rect)
+        } else {
+            self.rect
+        }
+    }
 }
 
 /// Wall clock time in the machine's own time zone.
@@ -156,4 +178,51 @@ impl LocalTime {
 /// Fall back to a sensible picture folder when the configuration is empty.
 pub fn default_screenshot_dir() -> PathBuf {
     pictures_dir().join("Visura")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn browser() -> WindowInfo {
+        WindowInfo {
+            rect: Rect::new(0, 0, 1600, 1000),
+            title: "Example - Browser".into(),
+            app: "browser".into(),
+            // The page, and a sidebar inside it.
+            areas: vec![Rect::new(0, 120, 1600, 880), Rect::new(0, 120, 300, 880)],
+        }
+    }
+
+    #[test]
+    fn a_point_on_the_page_takes_the_page() {
+        assert_eq!(
+            browser().target_at(900, 500, true),
+            Rect::new(0, 120, 1600, 880)
+        );
+    }
+
+    #[test]
+    fn the_smallest_pane_wins_where_panes_overlap() {
+        assert_eq!(
+            browser().target_at(100, 500, true),
+            Rect::new(0, 120, 300, 880)
+        );
+    }
+
+    #[test]
+    fn the_title_bar_takes_the_whole_window() {
+        assert_eq!(
+            browser().target_at(900, 40, true),
+            Rect::new(0, 0, 1600, 1000)
+        );
+    }
+
+    #[test]
+    fn with_panes_switched_off_it_is_always_the_window() {
+        assert_eq!(
+            browser().target_at(900, 500, false),
+            Rect::new(0, 0, 1600, 1000)
+        );
+    }
 }
