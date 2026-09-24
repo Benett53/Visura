@@ -178,6 +178,25 @@ pub fn capture_screen() -> Result<(Image, Rect), String> {
 ///
 /// Used to put the window in the middle of the screen someone is actually
 /// looking at, whatever its resolution.
+/// The work area of the primary monitor: the one with the task bar's start
+/// button, which always contains the desktop origin.
+pub fn primary_work_area() -> Rect {
+    unsafe {
+        use windows::Win32::Graphics::Gdi::MONITOR_DEFAULTTOPRIMARY;
+        let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetMonitorInfoW(monitor, &mut info).as_bool() {
+            let r = info.rcWork;
+            Rect::new(r.left, r.top, r.right - r.left, r.bottom - r.top)
+        } else {
+            virtual_screen()
+        }
+    }
+}
+
 pub fn work_area_at_cursor() -> Rect {
     unsafe {
         let (x, y) = cursor_position();
@@ -489,6 +508,22 @@ pub fn set_main_window(hwnd: isize) {
 /// Set while the main window is the capture overlay.
 static OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
 const OVERLAY_SUBCLASS_ID: usize = 0x5649_5355;
+
+/// Only a Linux question; Windows has one desktop protocol.
+pub fn is_wayland() -> bool {
+    false
+}
+
+/// The overlay covers the virtual desktop by position and size here, which
+/// spans every monitor; full screen would cover only one.
+pub fn overlay_fullscreen() -> bool {
+    false
+}
+
+/// Windows captures the active window from the full frame; see Linux.
+pub fn capture_active_window() -> Option<Result<Image, String>> {
+    None
+}
 
 /// Tell the window whether it is the overlay right now.
 ///

@@ -75,6 +75,29 @@ pub fn virtual_screen() -> Rect {
 ///
 /// Used to put the window in the middle of the screen someone is actually
 /// looking at, whatever its resolution.
+/// The primary monitor as RandR names it, or the whole screen without one.
+pub fn primary_work_area() -> Rect {
+    let whole = virtual_screen();
+    let Some(d) = display() else {
+        return whole;
+    };
+    let Some(reply) = d
+        .conn
+        .randr_get_monitors(d.root, true)
+        .ok()
+        .and_then(|c| c.reply().ok())
+    else {
+        return whole;
+    };
+    reply
+        .monitors
+        .iter()
+        .find(|m| m.primary)
+        .or(reply.monitors.first())
+        .map(|m| Rect::new(m.x as i32, m.y as i32, m.width as i32, m.height as i32))
+        .unwrap_or(whole)
+}
+
 pub fn work_area_at_cursor() -> Rect {
     let whole = virtual_screen();
     let Some(d) = display() else {
@@ -304,9 +327,17 @@ pub fn capture_screen() -> Result<(Image, Rect), String> {
 
     match capture_via_helper() {
         Ok(image) => {
-            let rect = Rect::new(0, 0, image.width as i32, image.height as i32);
+            // The frame is placed in the X server's coordinates, because that
+            // is where the pointer and the overlay window live. With display
+            // scaling the frame has more pixels than that; the overlay and
+            // the cropping scale between the two.
+            let rect = if screen.is_empty() {
+                Rect::new(0, 0, image.width as i32, image.height as i32)
+            } else {
+                screen
+            };
             if let Ok(mut frame) = HELPER_FRAME.lock() {
-                *frame = Some((image.width, image.height));
+                *frame = Some(rect);
             }
             Ok((image, rect))
         }
@@ -316,9 +347,106 @@ pub fn capture_screen() -> Result<(Image, Rect), String> {
     }
 }
 
-/// Size of the last frame that came from a screenshot helper rather than from
-/// X11, which means a Wayland session. `None` after an X11 capture.
-static HELPER_FRAME: Mutex<Option<(u32, u32)>> = Mutex::new(None);
+/// The desktop rectangle of the last frame that came from a screenshot helper
+/// rather than from X11, which means a Wayland session. `None` after an X11
+/// capture.
+static HELPER_FRAME: Mutex<Option<Rect>> = Mutex::new(None);
+
+/// A Wayland session. Visura itself always runs through XWayland there.
+pub fn is_wayland() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
+        || std::env::var("XDG_SESSION_TYPE").is_ok_and(|v| v == "wayland")
+}
+
+/// Which desktop this is, from `XDG_CURRENT_DESKTOP`, in lower case.
+fn desktop() -> String {
+    std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+/// How long a screenshot helper may take before it is given up on. Without a
+/// limit a helper waiting for something that never comes would hang Visura.
+const HELPER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Run a helper that writes an image to `target`. `None` when the program is
+/// not installed, otherwise whether it finished in time and successfully.
+fn run_helper(program: &str, args: &[&str]) -> Option<Result<(), String>> {
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + HELPER_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Some(Ok(())),
+            Ok(Some(status)) => return Some(Err(format!("{program} failed ({status})"))),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Some(Err(format!("{program} did not finish in time")));
+            }
+        }
+    }
+}
+
+fn read_image(path: &Path, program: &str) -> Result<Image, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{program} wrote no image: {e}"))?;
+    let _ = std::fs::remove_file(path);
+    let decoded = image::load_from_memory(&bytes)
+        .map_err(|e| format!("{program} produced an unreadable image: {e}"))?
+        .to_rgba8();
+    let (width, height) = (decoded.width(), decoded.height());
+    Ok(Image {
+        width,
+        height,
+        rgba: decoded.into_raw(),
+    })
+}
+
+/// Whether the overlay should ask to be full screen rather than only for the
+/// size of the desktop. With one monitor this also covers panels, which a
+/// window manager would otherwise keep a normal window off.
+pub fn overlay_fullscreen() -> bool {
+    let Some(d) = display() else {
+        return false;
+    };
+    d.conn
+        .randr_get_monitors(d.root, true)
+        .ok()
+        .and_then(|c| c.reply().ok())
+        .is_some_and(|reply| reply.monitors.len() == 1)
+}
+
+/// The window in front as an image of its own, straight from the desktop's
+/// screenshot tool, where that is the only way to know which window it is.
+/// KDE and GNOME do not tell other programs where their windows are.
+pub fn capture_active_window() -> Option<Result<Image, String>> {
+    if !is_wayland() {
+        return None;
+    }
+    let desktop = desktop();
+    let target = std::env::temp_dir().join(format!("visura-window-{}.png", std::process::id()));
+    let path = target.to_string_lossy().into_owned();
+    let (program, args): (&str, Vec<&str>) = if desktop.contains("kde") {
+        ("spectacle", vec!["-b", "-n", "-a", "-o", &path])
+    } else if desktop.contains("gnome") {
+        ("gnome-screenshot", vec!["-w", "-f", &path])
+    } else {
+        return None;
+    };
+    let _ = std::fs::remove_file(&target);
+    match run_helper(program, &args)? {
+        Ok(()) => Some(read_image(&target, program)),
+        Err(e) => Some(Err(e)),
+    }
+}
 
 /// Ask whatever screenshot helper the desktop ships for a full screen PNG.
 ///
@@ -330,47 +458,50 @@ fn capture_via_helper() -> Result<Image, String> {
     let target = std::env::temp_dir().join(format!("visura-frame-{}.png", std::process::id()));
     let path = target.to_string_lossy().into_owned();
 
-    let candidates: [(&str, Vec<&str>); 5] = [
-        // wlroots: Sway, Hyprland, river
+    let wlroots: [(&str, Vec<&str>); 2] = [
+        // Sway, Hyprland, river, niri, Wayfire
         ("grim", vec![&path]),
         ("wayshot", vec!["-f", &path]),
-        // KDE
-        ("spectacle", vec!["-b", "-n", "-f", "-o", &path]),
-        // GNOME
-        ("gnome-screenshot", vec!["-f", &path]),
-        // X11, in case the connection failed for some other reason
-        ("scrot", vec!["-o", &path]),
     ];
+    let kde = ("spectacle", vec!["-b", "-n", "-f", "-o", path.as_str()]);
+    let gnome = ("gnome-screenshot", vec!["-f", path.as_str()]);
+    // The desktop's own tool first: trying grim on KDE only costs time, and
+    // a tool meant for another desktop may do something unexpected.
+    let desktop = desktop();
+    let mut candidates: Vec<(&str, Vec<&str>)> = Vec::new();
+    if desktop.contains("kde") {
+        candidates.push(kde.clone());
+    } else if desktop.contains("gnome") {
+        candidates.push(gnome.clone());
+    }
+    candidates.extend(wlroots);
+    candidates.push(kde);
+    candidates.push(gnome);
+    // X11, in case the connection failed for some other reason
+    candidates.push(("scrot", vec!["-o", path.as_str()]));
 
-    let mut tried = Vec::new();
+    let mut failures = Vec::new();
+    let mut seen = Vec::new();
     for (program, args) in candidates {
-        let _ = std::fs::remove_file(&target);
-        let Ok(status) = std::process::Command::new(program).args(&args).status() else {
-            continue; // not installed
-        };
-        tried.push(program);
-        if !status.success() {
+        if seen.contains(&program) {
             continue;
         }
-        let Ok(bytes) = std::fs::read(&target) else {
-            continue;
-        };
+        seen.push(program);
         let _ = std::fs::remove_file(&target);
-        let decoded = image::load_from_memory(&bytes)
-            .map_err(|e| format!("{program} produced an unreadable image: {e}"))?
-            .to_rgba8();
-        let (width, height) = (decoded.width(), decoded.height());
-        return Ok(Image {
-            width,
-            height,
-            rgba: decoded.into_raw(),
-        });
+        match run_helper(program, &args) {
+            None => continue, // not installed
+            Some(Ok(())) => match read_image(&target, program) {
+                Ok(image) => return Ok(image),
+                Err(e) => failures.push(e),
+            },
+            Some(Err(e)) => failures.push(e),
+        }
     }
 
-    if tried.is_empty() {
-        Err("no screenshot helper found. Install grim (wlroots), spectacle (KDE) or gnome-screenshot (GNOME)".into())
+    if failures.is_empty() {
+        Err("no screenshot helper found. Install spectacle (KDE), gnome-screenshot (GNOME) or grim (Sway, Hyprland and other wlroots desktops)".into())
     } else {
-        Err(format!("the helper failed: tried {}", tried.join(", ")))
+        Err(failures.join("; "))
     }
 }
 
@@ -413,8 +544,8 @@ pub fn windows_in_z_order() -> Vec<WindowInfo> {
     // On Wayland the X server only knows the XWayland windows, and not where
     // they really are; the compositor is asked instead where it answers.
     let helper_frame = HELPER_FRAME.lock().ok().and_then(|frame| *frame);
-    if let Some(frame) = helper_frame {
-        return wayland::windows(frame);
+    if let Some(area) = helper_frame {
+        return wayland::windows(area);
     }
     let Some(d) = display() else {
         return Vec::new();
@@ -480,9 +611,14 @@ fn describe_window(
         return None;
     }
 
-    let app = net_pid
+    let pid = net_pid
         .and_then(|a| cardinals(d, window, a))
-        .and_then(|v| v.first().copied())
+        .and_then(|v| v.first().copied());
+    // Visura's own window is the overlay, or in the way; never a target.
+    if pid == Some(std::process::id()) {
+        return None;
+    }
+    let app = pid
         .and_then(|pid| std::fs::read_to_string(format!("/proc/{pid}/comm")).ok())
         .map(|s| s.trim().to_string())
         .or_else(|| {
@@ -503,6 +639,14 @@ fn describe_window(
 }
 
 pub fn foreground_window() -> Option<WindowInfo> {
+    // On Wayland the X server only knows about XWayland windows; the
+    // compositor knows which window really has the keyboard.
+    if is_wayland() {
+        let area = virtual_screen();
+        if let Some(window) = wayland::focused(area) {
+            return Some(window);
+        }
+    }
     let d = display()?;
     let active = atom(d, "_NET_ACTIVE_WINDOW")?;
     let window = cardinals(d, d.root, active)?.first().copied()?;

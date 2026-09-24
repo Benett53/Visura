@@ -24,6 +24,20 @@ pub struct Outcome {
     pub notes: Vec<String>,
 }
 
+/// The part of a frame that shows the desktop rectangle `region`, where the
+/// frame covers `screen`. The two may count in different units: under XWayland
+/// with display scaling the frame has physical pixels and the desktop logical
+/// ones, so the rectangle is scaled into the frame.
+pub fn crop_desktop(image: &Image, screen: Rect, region: Rect) -> Image {
+    let sx = image.width as f64 / screen.w.max(1) as f64;
+    let sy = image.height as f64 / screen.h.max(1) as f64;
+    let x0 = ((region.x - screen.x) as f64 * sx).round() as i32;
+    let y0 = ((region.y - screen.y) as f64 * sy).round() as i32;
+    let x1 = ((region.right() - screen.x) as f64 * sx).round() as i32;
+    let y1 = ((region.bottom() - screen.y) as f64 * sy).round() as i32;
+    image.crop(Rect::new(x0, y0, x1 - x0, y1 - y0))
+}
+
 /// Grab the whole virtual desktop. This is the frame the overlay freezes.
 pub fn grab_screen() -> Result<(Image, Rect), String> {
     platform::capture_screen()

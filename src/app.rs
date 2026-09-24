@@ -161,6 +161,7 @@ impl App {
         }
 
         let (config, problem) = Config::load();
+        let editor_settings = crate::editor::Settings::from_prefs(&config.editor);
         ui::theme::apply(&cc.egui_ctx, config.ui.theme, config.ui.accent);
         // Ctrl+plus and Ctrl+minus zoom the image in the viewer and editor,
         // not the whole interface.
@@ -200,7 +201,7 @@ impl App {
             open_request: None,
             viewer: None,
             editor: None,
-            editor_settings: crate::editor::Settings::default(),
+            editor_settings,
             pending_delete: Vec::new(),
             thumbs: Thumbs::new(),
             hotkeys,
@@ -315,10 +316,14 @@ impl App {
         // Taken before anything is hidden or moved: where the window was, what
         // it sat under, and which window had the keyboard.
         self.saved_placement = platform::save_window_placement();
+        // On Wayland the compositor decides which window is in front, and
+        // right after a click on "Capture window" that is Visura itself. It
+        // steps aside first, so the window behind it gets the keyboard.
+        let step_aside = mode == Mode::ActiveWindow && platform::is_wayland();
         self.pending = Some(Pending {
             mode,
             restore: self.where_the_window_belongs(),
-            hiding: on_screen && self.config.overlay.hide_self,
+            hiding: on_screen && (self.config.overlay.hide_self || step_aside),
             front_window,
         });
     }
@@ -470,7 +475,24 @@ impl App {
         }
     }
 
+    /// Keep the editor's settings for the next run.
+    pub fn remember_editor_settings(&mut self, settings: crate::editor::Settings) {
+        self.editor_settings = settings;
+        let prefs = settings.to_prefs();
+        if self.config.editor == prefs {
+            return;
+        }
+        self.config.editor = prefs.clone();
+        self.draft.editor = prefs;
+        if let Err(e) = self.config.save() {
+            self.warn(format!("The editor settings were not saved: {e}"));
+        }
+    }
+
     pub fn apply_settings(&mut self, ctx: &egui::Context) {
+        // The settings screen does not show the editor's settings; the draft
+        // may hold an older copy of them, which must not win.
+        self.draft.editor = self.config.editor.clone();
         let folder_changed = self.draft.folder != self.config.folder;
         let keep_changed = self.draft.keep_days != self.config.keep_days;
         let hotkeys_changed = self.draft.hotkeys != self.config.hotkeys;
@@ -637,6 +659,19 @@ impl App {
             std::thread::sleep(HIDE_SETTLE);
         }
 
+        // Where the desktop only reveals the front window to its own
+        // screenshot tool, that tool takes it.
+        if pending.mode == Mode::ActiveWindow
+            && let Some(result) = platform::capture_active_window()
+        {
+            match result {
+                Ok(image) => self.store(&image, None),
+                Err(e) => self.warn(format!("The window could not be captured: {e}")),
+            }
+            self.finish_capture(ctx, pending.restore, pending.hiding);
+            return;
+        }
+
         let (image, screen) = match capture::grab_screen() {
             Ok(result) => result,
             Err(e) => {
@@ -652,15 +687,15 @@ impl App {
                 self.finish_capture(ctx, pending.restore, pending.hiding);
             }
             Mode::ActiveWindow => {
-                match pending.front_window {
+                // Asked again after stepping aside on Wayland; see above.
+                let front = if platform::is_wayland() {
+                    platform::foreground_window().or(pending.front_window)
+                } else {
+                    pending.front_window
+                };
+                match front {
                     Some(window) => {
-                        let local = crate::platform::Rect::new(
-                            window.rect.x - screen.x,
-                            window.rect.y - screen.y,
-                            window.rect.w,
-                            window.rect.h,
-                        );
-                        let cropped = image.crop(local);
+                        let cropped = capture::crop_desktop(&image, screen, window.rect);
                         self.store(&cropped, Some(&window));
                     }
                     None => self.warn("No window is in front"),
@@ -735,6 +770,10 @@ impl App {
 
     /// Make the window cover exactly the given part of the desktop.
     fn cover_screen(ctx: &egui::Context, screen: platform::Rect) {
+        if platform::overlay_fullscreen() {
+            // Also covers panels a window manager keeps normal windows off.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+        }
         let points = ctx.pixels_per_point().max(0.1);
         ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
             screen.x as f32 / points,
@@ -753,6 +792,9 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
             egui::WindowLevel::Normal,
         ));
+        if platform::overlay_fullscreen() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
         ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
         let restore = self.overlay_restore;
         self.finish_capture(ctx, restore, true);
@@ -773,13 +815,7 @@ impl App {
             overlay::Outcome::Pending => self.overlay = Some(overlay),
             overlay::Outcome::Cancelled => self.leave_overlay(&ctx),
             overlay::Outcome::Selected(region) => {
-                let screen = overlay.screen;
-                let cropped = overlay.image.crop(platform::Rect::new(
-                    region.x - screen.x,
-                    region.y - screen.y,
-                    region.w,
-                    region.h,
-                ));
+                let cropped = overlay.crop(region);
                 let source = overlay
                     .window_at(region.x + region.w / 2, region.y + region.h / 2)
                     .cloned();
@@ -949,6 +985,10 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(editor) = &self.editor {
+            let settings = editor.settings;
+            self.remember_editor_settings(settings);
+        }
         if self.config.after.delete_on_exit {
             // Only files that are still there: the user may have deleted or
             // moved some already, and the recycle bin refuses the whole batch

@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.3.0
+
+Fixed:
+
+- Linux, Wayland: the selection overlay could swallow every click and look like
+  a frozen desktop. It waited for the window to cover the screen exactly, which
+  never happened with display scaling or when the desktop kept it off a panel.
+  It now works with whatever part of the screen it covers, goes full screen on
+  a single monitor, and scales between the screenshot's pixels and XWayland's
+  coordinates.
+- Linux, Wayland: "Capture window" found no window. It now steps aside and asks
+  the desktop: `spectacle -a` on KDE, `gnome-screenshot -w` on GNOME, the
+  compositor on Sway and Hyprland.
+- Linux: a screenshot tool that hangs is stopped after ten seconds instead of
+  blocking Visura, and the desktop's own tool is tried first.
+- Linux: Visura's own window is no longer offered as a capture target.
+
+Added:
+
+- Icons for every editor tool.
+- More settings per tool: opacity, dashed lines, corner radius, arrow head size
+  and heads at both ends, drop shadow, monospace text, the colour of black-out
+  boxes, and a fixed aspect ratio for cropping.
+- Each tool keeps its own settings, and the editor remembers them and the last
+  tool between runs (`[editor]` in the configuration).
+- The viewer and the editor open in the middle of the primary monitor.
+- A note in the settings on Wayland about binding `visura --shot` instead of
+  global shortcuts.
+
 ## 0.2.0
 
 Added:

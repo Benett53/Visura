@@ -4,6 +4,7 @@
 //! ignored and missing keys fall back to the default, so an older or newer
 //! file never stops the program from starting.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -230,6 +231,116 @@ pub struct Config {
     pub hotkeys: Hotkeys,
     pub overlay: Overlay,
     pub ui: Ui,
+    /// The editor's last tool and every tool's style, kept between runs.
+    pub editor: EditorPrefs,
+}
+
+/// What the editor remembers. Written by the editor when it closes; editing
+/// it by hand works, but the editor itself is the easier way.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EditorPrefs {
+    pub tool: String,
+    /// Crop shape: Free, 1:1, 4:3, 16:9 or 3:2.
+    pub aspect: String,
+    pub styles: BTreeMap<String, ToolStyle>,
+}
+
+/// One tool's style. Colours are `#rrggbb` or `#rrggbbaa`; no fill means
+/// outline only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolStyle {
+    pub color: String,
+    pub fill: Option<String>,
+    pub width: f32,
+    pub font_size: f32,
+    pub strength: f32,
+    pub round: bool,
+    pub opacity: f32,
+    pub dashed: bool,
+    pub corner: f32,
+    pub head: f32,
+    pub double_head: bool,
+    pub shadow: bool,
+    pub mono: bool,
+}
+
+impl Default for ToolStyle {
+    fn default() -> Self {
+        Self::from_style(&crate::editor::model::Style::default())
+    }
+}
+
+fn to_hex(c: egui::Color32) -> String {
+    let [r, g, b, a] = c.to_srgba_unmultiplied();
+    if a == 255 {
+        format!("#{r:02x}{g:02x}{b:02x}")
+    } else {
+        format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
+    }
+}
+
+fn from_hex(text: &str) -> Option<egui::Color32> {
+    let hex = text.trim().trim_start_matches('#');
+    let byte = |i: usize| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok();
+    match hex.len() {
+        6 => Some(egui::Color32::from_rgb(byte(0)?, byte(2)?, byte(4)?)),
+        8 => Some(egui::Color32::from_rgba_unmultiplied(
+            byte(0)?,
+            byte(2)?,
+            byte(4)?,
+            byte(6)?,
+        )),
+        _ => None,
+    }
+}
+
+impl ToolStyle {
+    pub fn from_style(s: &crate::editor::model::Style) -> Self {
+        Self {
+            color: to_hex(s.color),
+            fill: s.fill.map(to_hex),
+            width: s.width,
+            font_size: s.font_size,
+            strength: s.strength,
+            round: s.round,
+            opacity: s.opacity,
+            dashed: s.dashed,
+            corner: s.corner,
+            head: s.head,
+            double_head: s.double_head,
+            shadow: s.shadow,
+            mono: s.mono,
+        }
+    }
+
+    /// Back to a style, with values out of range pulled back in. A hand
+    /// edited file cannot produce a line of width zero or a negative blur.
+    pub fn to_style(&self, fallback: crate::editor::model::Style) -> crate::editor::model::Style {
+        let pick = |v: f32, lo: f32, hi: f32, default: f32| {
+            if v.is_finite() {
+                v.clamp(lo, hi)
+            } else {
+                default
+            }
+        };
+        crate::editor::model::Style {
+            color: from_hex(&self.color).unwrap_or(fallback.color),
+            fill: self.fill.as_deref().and_then(from_hex),
+            width: pick(self.width, 1.0, 80.0, fallback.width),
+            font_size: pick(self.font_size, 8.0, 300.0, fallback.font_size),
+            strength: pick(self.strength, 0.05, 60.0, fallback.strength),
+            round: self.round,
+            opacity: pick(self.opacity, 0.1, 1.0, fallback.opacity),
+            dashed: self.dashed,
+            corner: pick(self.corner, 0.0, 100.0, fallback.corner),
+            head: pick(self.head, 0.3, 4.0, fallback.head),
+            double_head: self.double_head,
+            shadow: self.shadow,
+            mono: self.mono,
+        }
+    }
 }
 
 impl Default for Config {
@@ -251,6 +362,7 @@ impl Default for Config {
             hotkeys: Hotkeys::default(),
             overlay: Overlay::default(),
             ui: Ui::default(),
+            editor: EditorPrefs::default(),
         }
     }
 }
@@ -361,5 +473,18 @@ mod tests {
         assert!(!keys.region.is_empty());
         assert!(keys.window.is_empty());
         assert!(keys.fullscreen.is_empty());
+    }
+
+    #[test]
+    fn colours_read_back_from_hex() {
+        let opaque = egui::Color32::from_rgb(0xe5, 0x39, 0x35);
+        assert_eq!(to_hex(opaque), "#e53935");
+        assert_eq!(from_hex("E53935"), Some(opaque));
+        // Colours are kept premultiplied, so a see-through one may move by a
+        // step when written; its alpha stays and it reads back the same.
+        let faint = from_hex("#e5393580").unwrap();
+        assert_eq!(faint.a(), 0x80);
+        assert_eq!(from_hex(&to_hex(faint)), Some(faint));
+        assert_eq!(from_hex("#nope"), None);
     }
 }

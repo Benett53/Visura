@@ -96,30 +96,78 @@ impl Tool {
         }
     }
 
+    /// A stable name for the configuration file.
+    pub fn id(self) -> &'static str {
+        match self {
+            Tool::Select => "select",
+            Tool::Rectangle => "rectangle",
+            Tool::Ellipse => "ellipse",
+            Tool::Arrow => "arrow",
+            Tool::Line => "line",
+            Tool::Pen => "pen",
+            Tool::Highlighter => "highlighter",
+            Tool::Text => "text",
+            Tool::Counter => "step",
+            Tool::Spotlight => "spotlight",
+            Tool::Blur => "blur",
+            Tool::Pixelate => "pixelate",
+            Tool::Redact => "blackout",
+            Tool::Crop => "crop",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Tool> {
+        Tool::ALL.into_iter().find(|t| t.id() == id)
+    }
+
+    /// Position in `ALL`, for per-tool arrays.
+    pub fn index(self) -> usize {
+        Tool::ALL.iter().position(|t| *t == self).unwrap_or(0)
+    }
+
     /// Which settings mean something for this tool.
     pub fn uses(self) -> Uses {
         let none = Uses::default();
+        let line = Uses {
+            color: true,
+            width: true,
+            opacity: true,
+            dashed: true,
+            shadow: true,
+            ..none
+        };
         match self {
-            Tool::Rectangle | Tool::Ellipse => Uses {
-                color: true,
-                width: true,
+            Tool::Rectangle => Uses {
                 fill: true,
-                ..none
+                corner: true,
+                ..line
             },
-            Tool::Arrow | Tool::Line | Tool::Pen | Tool::Highlighter => Uses {
+            Tool::Ellipse => Uses { fill: true, ..line },
+            Tool::Arrow => Uses { head: true, ..line },
+            Tool::Line => line,
+            Tool::Pen => Uses {
+                dashed: false,
+                ..line
+            },
+            Tool::Highlighter => Uses {
                 color: true,
                 width: true,
+                opacity: true,
                 ..none
             },
             Tool::Text => Uses {
                 color: true,
                 fill: true,
                 font: true,
+                opacity: true,
+                shadow: true,
+                mono: true,
                 ..none
             },
             Tool::Counter => Uses {
                 color: true,
                 font: true,
+                shadow: true,
                 ..none
             },
             Tool::Spotlight => Uses {
@@ -131,7 +179,11 @@ impl Tool {
                 strength: true,
                 ..none
             },
-            Tool::Select | Tool::Redact | Tool::Crop => none,
+            Tool::Redact => Uses {
+                color: true,
+                ..none
+            },
+            Tool::Select | Tool::Crop => none,
         }
     }
 }
@@ -144,6 +196,12 @@ pub struct Uses {
     pub font: bool,
     pub strength: bool,
     pub round: bool,
+    pub opacity: bool,
+    pub dashed: bool,
+    pub corner: bool,
+    pub head: bool,
+    pub shadow: bool,
+    pub mono: bool,
 }
 
 /// How an annotation looks. Every annotation keeps its own copy, so changing
@@ -162,17 +220,77 @@ pub struct Style {
     pub strength: f32,
     /// Spotlight as an ellipse rather than a rectangle.
     pub round: bool,
+    /// 0 to 1, applied to line and fill alike.
+    pub opacity: f32,
+    pub dashed: bool,
+    /// Corner radius of a rectangle, in image pixels.
+    pub corner: f32,
+    /// Arrow head size, relative to what the line width suggests.
+    pub head: f32,
+    /// Arrow heads at both ends.
+    pub double_head: bool,
+    /// A soft dark copy underneath, which keeps marks readable on busy or
+    /// light backgrounds.
+    pub shadow: bool,
+    /// Fixed width text, for code and paths.
+    pub mono: bool,
 }
+
+pub const RED: Color32 = Color32::from_rgb(0xe5, 0x39, 0x35);
 
 impl Default for Style {
     fn default() -> Self {
         Self {
-            color: Color32::from_rgb(0xe5, 0x39, 0x35),
+            color: RED,
             fill: None,
             width: 4.0,
             font_size: 28.0,
             strength: 12.0,
             round: false,
+            opacity: 1.0,
+            dashed: false,
+            corner: 0.0,
+            head: 1.0,
+            double_head: false,
+            shadow: false,
+            mono: false,
+        }
+    }
+}
+
+impl Style {
+    /// What a tool starts with before the user has changed anything.
+    pub fn for_tool(tool: Tool) -> Style {
+        let base = Style::default();
+        match tool {
+            Tool::Arrow => Style { width: 5.0, ..base },
+            Tool::Highlighter => Style {
+                color: Color32::from_rgb(0xfd, 0xd8, 0x35),
+                width: 18.0,
+                opacity: 0.45,
+                ..base
+            },
+            Tool::Counter => Style {
+                font_size: 24.0,
+                ..base
+            },
+            Tool::Spotlight => Style {
+                strength: 0.6,
+                ..base
+            },
+            Tool::Blur => Style {
+                strength: 10.0,
+                ..base
+            },
+            Tool::Pixelate => Style {
+                strength: 12.0,
+                ..base
+            },
+            Tool::Redact => Style {
+                color: Color32::BLACK,
+                ..base
+            },
+            _ => base,
         }
     }
 }
@@ -200,10 +318,6 @@ pub struct Annotation {
     pub shape: Shape,
     pub style: Style,
 }
-
-/// How a highlighter stroke relates to the chosen width and colour.
-pub const HIGHLIGHTER_WIDTH: f32 = 4.0;
-pub const HIGHLIGHTER_ALPHA: u8 = 110;
 
 /// Size of the circle behind a step number, relative to the font size.
 pub const COUNTER_RADIUS: f32 = 0.8;
@@ -271,14 +385,11 @@ impl Annotation {
     }
 
     pub fn stroke_width(&self) -> f32 {
-        match self.shape {
-            Shape::Highlighter(_) => self.style.width * HIGHLIGHTER_WIDTH,
-            _ => self.style.width,
-        }
+        self.style.width
     }
 
     pub fn head_length(&self) -> f32 {
-        arrow_head_length(self.style.width)
+        arrow_head_length(self.style.width) * self.style.head.clamp(0.3, 4.0)
     }
 
     pub fn counter_radius(&self) -> f32 {

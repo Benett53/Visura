@@ -36,8 +36,20 @@ pub enum Outcome {
 }
 
 pub struct Overlay {
+    /// The frozen frame. It may have more pixels than `screen` has desktop
+    /// units: under XWayland with display scaling the screenshot helper
+    /// delivers physical pixels while the X server counts logical ones.
     pub image: Image,
+    /// The part of the desktop the frame shows, in the coordinates of the
+    /// pointer and the window list.
     pub screen: Rect,
+    /// The part of the desktop the overlay window really covers, from the
+    /// last frame. Usually `screen`; smaller where the window manager would
+    /// not let the window grow, which must never make the overlay unusable.
+    view: Option<Rect>,
+    /// Frames in a row with the same `view`. Input waits for two, so a click
+    /// is never mapped through a geometry that is still changing.
+    stable_frames: u32,
     windows: Vec<WindowInfo>,
     texture: Option<egui::TextureHandle>,
     drag_start: Option<(i32, i32)>,
@@ -83,6 +95,8 @@ impl Overlay {
             // until the user moves the mouse.
             cursor: crate::platform::cursor_position(),
             outline: None,
+            view: None,
+            stable_frames: 0,
             unsettled_frames: 0,
             ctrl_held: false,
             primary_was_down,
@@ -115,12 +129,37 @@ impl Overlay {
 
     /// Whether the window should be asked again to cover the screen.
     ///
-    /// Normally the first request is enough. If the window ended up a
-    /// different size anyway, repeating the request every few frames puts it
-    /// back instead of leaving the overlay stuck in a state where a click
-    /// cannot be trusted.
+    /// Normally the first request is enough. If the window ended up smaller
+    /// anyway, the request is repeated a few times; after that the overlay
+    /// simply works with what it got.
     pub fn wants_geometry(&self) -> bool {
-        self.unsettled_frames > 0 && self.unsettled_frames % 15 == 0
+        self.unsettled_frames > 0 && self.unsettled_frames % 15 == 0 && self.unsettled_frames <= 60
+    }
+
+    /// Pixels of the frozen frame per desktop unit, across and down.
+    fn pixel_scale(&self) -> (f32, f32) {
+        (
+            self.image.width as f32 / self.screen.w.max(1) as f32,
+            self.image.height as f32 / self.screen.h.max(1) as f32,
+        )
+    }
+
+    /// The part of the frozen frame showing a desktop rectangle.
+    pub fn crop(&self, region: Rect) -> Image {
+        crate::capture::crop_desktop(&self.image, self.screen, region)
+    }
+
+    /// Texture coordinates of the part of the frame under `view`.
+    fn frame_uv(&self, view: Rect) -> UiRect {
+        let s = self.screen;
+        let (w, h) = (s.w.max(1) as f32, s.h.max(1) as f32);
+        UiRect::from_min_max(
+            pos2((view.x - s.x) as f32 / w, (view.y - s.y) as f32 / h),
+            pos2(
+                (view.right() - s.x) as f32 / w,
+                (view.bottom() - s.y) as f32 / h,
+            ),
+        )
     }
 
     /// The top most window containing a point, for naming the saved file.
@@ -177,40 +216,74 @@ impl Overlay {
             return Outcome::Selected(self.screen);
         }
 
-        // The window is asked to cover the whole desktop, but the window
-        // manager needs a frame or two to comply. Until the size matches,
-        // the frozen frame is shown and pointer input is ignored, so an early
-        // click cannot land on the wrong pixels.
+        // Which part of the desktop the window really covers. It is asked to
+        // cover all of it, but a window manager may keep it off a panel, a
+        // compositor may count in different units, and moving takes a frame
+        // or two. The overlay used to wait for an exact fit and swallow every
+        // click until then, which on some Wayland desktops meant forever and
+        // looked like a frozen computer. Now it shows and selects exactly
+        // the part it covers, whatever that is.
         let points = ui.ctx().pixels_per_point();
-        let settled = (area.width() * points - self.screen.w as f32).abs() <= 3.0
-            && (area.height() * points - self.screen.h as f32).abs() <= 3.0;
-        if !settled {
-            self.unsettled_frames += 1;
-            // A press that began before the window was in place is dropped,
-            // not carried over into a click on pixels nobody saw yet.
+        let view = ctx
+            .input(|i| i.viewport().inner_rect)
+            .map(|r| {
+                Rect::new(
+                    (r.min.x * points).round() as i32,
+                    (r.min.y * points).round() as i32,
+                    (r.width() * points).round() as i32,
+                    (r.height() * points).round() as i32,
+                )
+            })
+            .filter(|r| !r.intersect(&self.screen).is_empty())
+            .unwrap_or(self.screen);
+        if self.view == Some(view) {
+            self.stable_frames = self.stable_frames.saturating_add(1);
+        } else {
+            self.view = Some(view);
+            self.stable_frames = 0;
+        }
+        if view == self.screen {
+            self.unsettled_frames = 0;
+        } else {
+            self.unsettled_frames = self.unsettled_frames.saturating_add(1);
+        }
+        if self.stable_frames < 2 {
+            // A press that began while the window was still moving is
+            // dropped, not carried over into a click on pixels nobody saw.
             self.drag_start = None;
             self.dragged = false;
-            painter.image(
-                texture_id,
-                area,
-                UiRect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
+            painter.image(texture_id, area, self.frame_uv(view), Color32::WHITE);
+            ctx.request_repaint();
             return Outcome::Pending;
         }
-        self.unsettled_frames = 0;
         self.ctrl_held = crate::platform::ctrl_key_down();
 
-        // The window is meant to cover the whole virtual desktop, but its real
-        // size is whatever the window manager granted. Mapping from the actual
-        // rectangle keeps the drawing exact either way.
-        let map = Mapping::new(area, self.screen);
+        // Everything is drawn and picked through the covered part.
+        let map = Mapping::new(area, view);
 
         // ------------------------------------------------------- input ----
         let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
 
         if pressed {
-            self.drag_start = Some(self.cursor);
+            // Where the button went down, if egui saw it: polling only sees
+            // the pointer once per frame, by which time a quick drag may
+            // already be under way. Otherwise the polled position.
+            let event = ctx.input(|i| {
+                i.events.iter().find_map(|e| match e {
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        ..
+                    } => Some(*pos),
+                    _ => None,
+                })
+            });
+            let start = event
+                .filter(|pos| area.contains(*pos))
+                .map(|pos| map.to_physical(pos))
+                .unwrap_or(self.cursor);
+            self.drag_start = Some(start);
             self.dragged = false;
         }
         if let Some(start) = self.drag_start
@@ -252,12 +325,7 @@ impl Overlay {
         }
 
         // ------------------------------------------------------- paint ----
-        painter.image(
-            texture_id,
-            area,
-            UiRect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-            Color32::WHITE,
-        );
+        painter.image(texture_id, area, self.frame_uv(view), Color32::WHITE);
 
         // The outline eases across to a new window rather than jumping, which
         // makes it obvious that one outline moved instead of two blinking.
@@ -445,8 +513,9 @@ impl Overlay {
         let box_rect = UiRect::from_min_size(origin, Vec2::splat(MAGNIFIER_SIZE));
 
         let (w, h) = (self.image.width as f32, self.image.height as f32);
-        let cx = (self.cursor.0 - self.screen.x) as f32;
-        let cy = (self.cursor.1 - self.screen.y) as f32;
+        let (sx, sy) = self.pixel_scale();
+        let cx = ((self.cursor.0 - self.screen.x) as f32 * sx).floor();
+        let cy = ((self.cursor.1 - self.screen.y) as f32 * sy).floor();
         let uv = UiRect::from_min_max(
             pos2((cx - MAGNIFIER_RADIUS) / w, (cy - MAGNIFIER_RADIUS) / h),
             pos2(
@@ -543,9 +612,7 @@ impl Mapping {
         Self { area, screen }
     }
 
-    /// The inverse of `to_ui`. The pointer now comes from the system in
-    /// physical pixels, so this is only needed to check `to_ui` against.
-    #[cfg(test)]
+    /// The inverse of `to_ui`, for positions egui reports.
     fn to_physical(&self, p: Pos2) -> (i32, i32) {
         let fx = ((p.x - self.area.min.x) / self.area.width().max(1.0)).clamp(0.0, 1.0);
         let fy = ((p.y - self.area.min.y) / self.area.height().max(1.0)).clamp(0.0, 1.0);

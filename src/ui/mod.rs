@@ -46,6 +46,28 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
 const VIEWER: &str = "visura-viewer";
 const EDITOR: &str = "visura-editor";
 
+/// A window of about `wanted` points, in the middle of the primary monitor
+/// and never larger than most of it.
+fn centred(
+    ctx: &egui::Context,
+    wanted: [f32; 2],
+    builder: egui::ViewportBuilder,
+) -> egui::ViewportBuilder {
+    let area = crate::platform::primary_work_area();
+    if area.is_empty() {
+        return builder.with_inner_size(wanted);
+    }
+    let points = ctx.pixels_per_point().max(0.1);
+    let (aw, ah) = (area.w as f32 / points, area.h as f32 / points);
+    let size = egui::vec2(wanted[0].min(aw * 0.92), wanted[1].min(ah * 0.9));
+    // The title bar adds a little on top; leave room for it.
+    let x = area.x as f32 / points + (aw - size.x) / 2.0;
+    let y = area.y as f32 / points + ((ah - size.y) / 2.0 - 16.0).max(0.0);
+    builder
+        .with_inner_size(size)
+        .with_position(egui::pos2(x.round(), y.round()))
+}
+
 fn open_requested(app: &mut App, ctx: &egui::Context) {
     let Some(request) = app.open_request.take() else {
         return;
@@ -93,10 +115,13 @@ fn viewer_window(app: &mut App, ui: &mut egui::Ui) {
     };
     let path = open.path.clone();
     let ctx = ui.ctx().clone();
-    let builder = egui::ViewportBuilder::default()
-        .with_title(open.title())
-        .with_inner_size([1100.0, 760.0])
-        .with_min_inner_size([420.0, 300.0]);
+    let builder = centred(
+        &ctx,
+        [1100.0, 760.0],
+        egui::ViewportBuilder::default()
+            .with_title(open.title())
+            .with_min_inner_size([420.0, 300.0]),
+    );
     let position = app.position_of(&path);
     let palette = app.palette();
     let mut actions = Vec::new();
@@ -136,10 +161,13 @@ fn editor_window(app: &mut App, ui: &mut egui::Ui) {
         return;
     };
     let ctx = ui.ctx().clone();
-    let builder = egui::ViewportBuilder::default()
-        .with_title(open.title())
-        .with_inner_size([1280.0, 820.0])
-        .with_min_inner_size([760.0, 480.0]);
+    let builder = centred(
+        &ctx,
+        [1320.0, 840.0],
+        egui::ViewportBuilder::default()
+            .with_title(open.title())
+            .with_min_inner_size([760.0, 480.0]),
+    );
     let palette = app.palette();
     let mut actions = Vec::new();
 
@@ -161,7 +189,7 @@ fn editor_window(app: &mut App, ui: &mut egui::Ui) {
         match action {
             crate::editor::Action::Close => {
                 if let Some(editor) = app.editor.take() {
-                    app.editor_settings = editor.settings;
+                    app.remember_editor_settings(editor.settings);
                 }
             }
             crate::editor::Action::Saved(path) => {

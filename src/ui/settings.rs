@@ -295,6 +295,16 @@ impl App {
                     .color(palette.muted)
                     .size(11.5),
             );
+            if crate::platform::is_wayland() {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(
+                        "On Wayland these shortcuts only work while a Visura or other X11                          window has the keyboard. For a key that works everywhere, add a                          shortcut in the desktop's keyboard settings that runs                          visura --shot region (or window, or screen).",
+                    )
+                    .color(palette.danger)
+                    .size(11.5),
+                );
+            }
 
             if !self.hotkeys.problems.is_empty() {
                 ui.add_space(8.0);

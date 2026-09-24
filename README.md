@@ -127,6 +127,21 @@ so anything can be selected, moved, resized, restyled or undone. Blur,
 pixelation and black boxes are burnt into the pixels on saving; the original
 text under them is not kept in the file.
 
+Every tool keeps its own settings, and they are remembered between runs:
+
+| Tool | Settings |
+|---|---|
+| Rectangle, ellipse | Colour, width, opacity, fill, dashed, shadow; corner radius for rectangles |
+| Arrow | Colour, width, opacity, head size, heads at both ends, dashed, shadow |
+| Line, pen | Colour, width, opacity, shadow; dashed for lines |
+| Highlighter | Colour, width, opacity |
+| Text | Colour, size, opacity, background, monospace, shadow |
+| Step number | Colour, size, shadow |
+| Spotlight | Dimming, round or rectangular |
+| Blur, pixelate | Strength or block size |
+| Black out | Colour |
+| Crop | Free, 1:1, 4:3, 16:9 or 3:2 |
+
 | Tool | Key | | Tool | Key |
 |---|---|---|---|---|
 | Select | `V` | | Step number | `N` |
@@ -196,6 +211,9 @@ close_to_tray = false
 confirm_delete = true
 ```
 
+The editor writes its own `[editor]` section with the last tool and each tool's
+settings; it is not shown here.
+
 `keep_days = 0` keeps shots forever. `panes_first = true` makes a plain click
 take the pane and `Ctrl` the whole window.
 
@@ -222,16 +240,22 @@ hold up, but it has only been run on a single scale factor.
 X11 is the native path: it can read the whole screen and the geometry of every
 window, which is what the overlay is built on.
 
-Under Wayland neither is allowed. XWayland answers the connection but reading
-the root window fails, so the capture falls back to the screenshot helper the
-desktop ships — `grim`, `wayshot`, `spectacle` or `gnome-screenshot`, whichever
-is installed. That yields the same frozen frame. Window positions come from the
-compositor where it tells them: Hyprland (`hyprctl`) and Sway (`swaymsg`).
-Elsewhere, for example on GNOME and KDE, windows are not outlined and a click
-selects nothing.
+On Wayland Visura runs through XWayland. Reading the screen is not allowed
+there, so the capture goes through the desktop's own screenshot tool:
+`spectacle` on KDE, `gnome-screenshot` on GNOME, `grim` (or `wayshot`) on Sway,
+Hyprland and other wlroots desktops. One of them has to be installed. Display
+scaling is handled: the frame from the tool may have more pixels than XWayland
+counts, and selections are scaled into it.
 
-Global shortcuts do not work on Wayland. Bind `visura --shot region` to a key in
-the desktop's keyboard settings instead.
+| | KDE | GNOME | Sway, Hyprland |
+|---|---|---|---|
+| Region, full screen | yes | yes | yes |
+| Window | yes, via `spectacle -a` | yes, via `gnome-screenshot -w` | yes, via the compositor |
+| Window outlines in the overlay | no | no | yes |
+
+Global shortcuts only reach Visura while an X11 window has the keyboard. Add a
+shortcut in the desktop's keyboard settings that runs `visura --shot region`
+(or `window`, `screen`) instead; it hands the request to the running Visura.
 
 No tray icon on Linux. It would mean a GTK and libayatana-appindicator
 dependency for one icon, so closing the window quits instead.

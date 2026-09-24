@@ -5,6 +5,7 @@
 //! result is saved or copied (see `render`).
 
 pub mod effects;
+pub mod icons;
 pub mod model;
 pub mod render;
 
@@ -45,27 +46,112 @@ pub const SWATCHES: [Color32; 8] = [
     Color32::BLACK,
 ];
 
-/// Everything the editor remembers between two edits in one session: the
-/// last tool and its settings.
-#[derive(Clone, Copy)]
+/// How a crop is constrained while dragging.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Aspect {
+    Free,
+    Square,
+    FourThree,
+    SixteenNine,
+    ThreeTwo,
+}
+
+impl Aspect {
+    pub const ALL: [Aspect; 5] = [
+        Aspect::Free,
+        Aspect::Square,
+        Aspect::FourThree,
+        Aspect::SixteenNine,
+        Aspect::ThreeTwo,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Aspect::Free => "Free",
+            Aspect::Square => "1:1",
+            Aspect::FourThree => "4:3",
+            Aspect::SixteenNine => "16:9",
+            Aspect::ThreeTwo => "3:2",
+        }
+    }
+
+    /// Width over height, or `None` for any shape.
+    pub fn ratio(self) -> Option<f32> {
+        match self {
+            Aspect::Free => None,
+            Aspect::Square => Some(1.0),
+            Aspect::FourThree => Some(4.0 / 3.0),
+            Aspect::SixteenNine => Some(16.0 / 9.0),
+            Aspect::ThreeTwo => Some(1.5),
+        }
+    }
+
+    pub fn from_label(label: &str) -> Aspect {
+        Aspect::ALL
+            .into_iter()
+            .find(|a| a.label() == label)
+            .unwrap_or(Aspect::Free)
+    }
+}
+
+/// Everything the editor remembers between edits, and across restarts: the
+/// last tool, every tool's own style and the crop shape.
+#[derive(Clone, Copy, PartialEq)]
 pub struct Settings {
     pub tool: Tool,
-    pub style: Style,
-    pub blur_radius: f32,
-    pub pixel_size: f32,
-    pub spot_dim: f32,
-    pub spot_round: bool,
+    pub styles: [Style; Tool::ALL.len()],
+    pub aspect: Aspect,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             tool: Tool::Rectangle,
-            style: Style::default(),
-            blur_radius: 10.0,
-            pixel_size: 12.0,
-            spot_dim: 0.6,
-            spot_round: false,
+            styles: Tool::ALL.map(Style::for_tool),
+            aspect: Aspect::Free,
+        }
+    }
+}
+
+impl Settings {
+    pub fn style(&self, tool: Tool) -> &Style {
+        &self.styles[tool.index()]
+    }
+
+    pub fn style_mut(&mut self, tool: Tool) -> &mut Style {
+        &mut self.styles[tool.index()]
+    }
+
+    /// Read back from the configuration file. Anything missing or unknown
+    /// keeps its default.
+    pub fn from_prefs(prefs: &crate::config::EditorPrefs) -> Self {
+        let mut settings = Settings::default();
+        if let Some(tool) = Tool::from_id(&prefs.tool) {
+            settings.tool = tool;
+        }
+        settings.aspect = Aspect::from_label(&prefs.aspect);
+        for tool in Tool::ALL {
+            if let Some(saved) = prefs.styles.get(tool.id()) {
+                *settings.style_mut(tool) = saved.to_style(Style::for_tool(tool));
+            }
+        }
+        settings
+    }
+
+    pub fn to_prefs(self) -> crate::config::EditorPrefs {
+        crate::config::EditorPrefs {
+            tool: self.tool.id().to_string(),
+            aspect: self.aspect.label().to_string(),
+            styles: Tool::ALL
+                .into_iter()
+                .filter(|t| !matches!(t, Tool::Select | Tool::Crop))
+                .map(|t| {
+                    (
+                        t.id().to_string(),
+                        crate::config::ToolStyle::from_style(self.style(t)),
+                    )
+                })
+                .collect(),
         }
     }
 }
@@ -290,39 +376,24 @@ impl Editor {
 
     /// The style a new annotation of this kind gets from the settings.
     fn style_for(&self, tool: Tool) -> Style {
-        let s = &self.settings;
-        Style {
-            strength: match tool {
-                Tool::Blur => s.blur_radius,
-                Tool::Pixelate => s.pixel_size,
-                Tool::Spotlight => s.spot_dim,
-                _ => 0.0,
-            },
-            round: s.spot_round,
-            ..s.style
-        }
+        *self.settings.style(tool)
     }
 
-    /// Show a selected annotation's style in the settings, so it can be
-    /// changed there.
+    /// Show a selected annotation's style in its tool's settings, so it can
+    /// be changed there.
     fn load_style(&mut self, index: usize) {
         let Some(item) = self.doc.items.get(index) else {
             return;
         };
         let (tool, style) = (tool_of(&item.shape), item.style);
-        let s = &mut self.settings;
-        s.style.color = style.color;
-        s.style.fill = style.fill;
-        s.style.width = style.width;
-        s.style.font_size = style.font_size;
-        match tool {
-            Tool::Blur => s.blur_radius = style.strength,
-            Tool::Pixelate => s.pixel_size = style.strength,
-            Tool::Spotlight => {
-                s.spot_dim = style.strength;
-                s.spot_round = style.round;
-            }
-            _ => {}
+        *self.settings.style_mut(tool) = style;
+    }
+
+    /// The tool whose settings the bar shows: the selection's, if any.
+    fn active_tool(&self) -> Tool {
+        match self.selected.and_then(|i| self.doc.items.get(i)) {
+            Some(item) => tool_of(&item.shape),
+            None => self.settings.tool,
         }
     }
 
@@ -645,17 +716,25 @@ impl Editor {
             self.apply_crop();
         }
         if width != 0.0 {
-            let s = &mut self.settings.style;
-            if self.settings.tool == Tool::Text || self.settings.tool == Tool::Counter {
-                s.font_size = (s.font_size + width * 2.0).clamp(8.0, 300.0);
-            } else {
-                s.width = (s.width + width).clamp(1.0, 60.0);
+            let tool = self.active_tool();
+            let s = self.settings.style_mut(tool);
+            match tool {
+                Tool::Text | Tool::Counter => {
+                    s.font_size = (s.font_size + width * 2.0).clamp(8.0, 300.0);
+                }
+                Tool::Blur | Tool::Pixelate => {
+                    s.strength = (s.strength + width).clamp(2.0, 60.0);
+                }
+                _ => s.width = (s.width + width).clamp(1.0, 80.0),
             }
             self.apply_settings_to_selection();
         }
         if let Some(n) = swatch {
-            self.settings.style.color = SWATCHES[n];
-            self.apply_settings_to_selection();
+            let tool = self.active_tool();
+            if tool.uses().color {
+                self.settings.style_mut(tool).color = SWATCHES[n];
+                self.apply_settings_to_selection();
+            }
         }
         if escape {
             if self.gesture.is_some() {
@@ -685,134 +764,13 @@ impl Editor {
 
     fn top_bar(&mut self, ui: &mut egui::Ui, palette: &Palette, actions: &mut Vec<Action>) {
         ui.horizontal_centered(|ui| {
-            let tool = match self.selected.and_then(|i| self.doc.items.get(i)) {
-                Some(item) => tool_of(&item.shape),
-                None => self.settings.tool,
-            };
-            let uses = tool.uses();
+            let tool = self.active_tool();
             let before = self.settings;
-
-            if uses.color {
-                for (n, colour) in SWATCHES.iter().enumerate() {
-                    let chosen = self.settings.style.color == *colour;
-                    let (rect, response) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
-                    let painter = ui.painter();
-                    painter.rect_filled(rect.shrink(2.0), 4.0, *colour);
-                    let ring = if chosen { palette.accent } else { palette.line };
-                    painter.rect_stroke(
-                        rect.shrink(1.0),
-                        5.0,
-                        Stroke::new(if chosen { 2.0 } else { 1.0 }, ring),
-                        egui::StrokeKind::Inside,
-                    );
-                    if response.on_hover_text(format!("{}", n + 1)).clicked() {
-                        self.settings.style.color = *colour;
-                    }
-                }
-                egui::color_picker::color_edit_button_srgba(
-                    ui,
-                    &mut self.settings.style.color,
-                    egui::color_picker::Alpha::OnlyBlend,
-                )
-                .on_hover_text("Any colour");
-                ui.separator();
-            }
-            if uses.width {
-                ui.label(RichText::new("Width").color(palette.muted));
-                ui.add(
-                    egui::DragValue::new(&mut self.settings.style.width)
-                        .range(1.0..=60.0)
-                        .speed(0.2)
-                        .suffix(" px"),
-                )
-                .on_hover_text("[ and ]");
-            }
-            if uses.font {
-                ui.label(RichText::new("Size").color(palette.muted));
-                ui.add(
-                    egui::DragValue::new(&mut self.settings.style.font_size)
-                        .range(8.0..=300.0)
-                        .speed(0.5)
-                        .suffix(" px"),
-                )
-                .on_hover_text("[ and ]");
-            }
-            if uses.fill {
-                let mut filled = self.settings.style.fill.is_some();
-                if ui.checkbox(&mut filled, "Fill").changed() {
-                    self.settings.style.fill = if filled {
-                        let [r, g, b, _] = self.settings.style.color.to_array();
-                        let alpha = if tool == Tool::Text { 255 } else { 70 };
-                        Some(Color32::from_rgba_unmultiplied(r, g, b, alpha))
-                    } else {
-                        None
-                    };
-                }
-                if let Some(fill) = &mut self.settings.style.fill {
-                    egui::color_picker::color_edit_button_srgba(
-                        ui,
-                        fill,
-                        egui::color_picker::Alpha::OnlyBlend,
-                    )
-                    .on_hover_text("Fill colour");
-                }
-            }
-            if uses.strength {
-                match tool {
-                    Tool::Blur => {
-                        ui.label(RichText::new("Strength").color(palette.muted));
-                        ui.add(egui::Slider::new(
-                            &mut self.settings.blur_radius,
-                            2.0..=60.0,
-                        ));
-                    }
-                    Tool::Pixelate => {
-                        ui.label(RichText::new("Block").color(palette.muted));
-                        ui.add(
-                            egui::Slider::new(&mut self.settings.pixel_size, 3.0..=60.0)
-                                .suffix(" px"),
-                        );
-                    }
-                    Tool::Spotlight => {
-                        ui.label(RichText::new("Dim").color(palette.muted));
-                        let mut percent = self.settings.spot_dim * 100.0;
-                        if ui
-                            .add(egui::Slider::new(&mut percent, 10.0..=95.0).suffix(" %"))
-                            .changed()
-                        {
-                            self.settings.spot_dim = percent / 100.0;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if uses.round {
-                ui.checkbox(&mut self.settings.spot_round, "Round");
-            }
+            self.style_controls(ui, palette, tool);
             if tool == Tool::Crop || self.settings.tool == Tool::Crop {
-                if ui
-                    .add_enabled(self.crop_draft.is_some(), egui::Button::new("Apply crop"))
-                    .on_hover_text("Enter")
-                    .clicked()
-                {
-                    self.apply_crop();
-                }
-                if ui
-                    .add_enabled(self.doc.crop.is_some(), egui::Button::new("Reset"))
-                    .clicked()
-                {
-                    self.reset_crop();
-                }
+                self.crop_controls(ui, palette);
             }
-            if self.settings.style.width != before.style.width
-                || self.settings.style.color != before.style.color
-                || self.settings.style.fill != before.style.fill
-                || self.settings.style.font_size != before.style.font_size
-                || self.settings.blur_radius != before.blur_radius
-                || self.settings.pixel_size != before.pixel_size
-                || self.settings.spot_dim != before.spot_dim
-                || self.settings.spot_round != before.spot_round
-            {
+            if self.settings.styles != before.styles {
                 self.apply_settings_to_selection();
             }
 
@@ -853,6 +811,182 @@ impl Editor {
         });
     }
 
+    /// The settings of one tool, only those that mean something for it.
+    fn style_controls(&mut self, ui: &mut egui::Ui, palette: &Palette, tool: Tool) {
+        let uses = tool.uses();
+        let muted = palette.muted;
+        let label = |ui: &mut egui::Ui, text: &str| {
+            ui.label(RichText::new(text).color(muted));
+        };
+        let style = self.settings.style_mut(tool);
+
+        if uses.color {
+            for (n, colour) in SWATCHES.iter().enumerate() {
+                let chosen = style.color == *colour;
+                let (rect, response) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
+                let painter = ui.painter();
+                painter.rect_filled(rect.shrink(2.0), 4.0, *colour);
+                let ring = if chosen { palette.accent } else { palette.line };
+                painter.rect_stroke(
+                    rect.shrink(1.0),
+                    5.0,
+                    Stroke::new(if chosen { 2.0 } else { 1.0 }, ring),
+                    egui::StrokeKind::Inside,
+                );
+                if response.on_hover_text(format!("{}", n + 1)).clicked() {
+                    style.color = *colour;
+                }
+            }
+            egui::color_picker::color_edit_button_srgba(
+                ui,
+                &mut style.color,
+                egui::color_picker::Alpha::Opaque,
+            )
+            .on_hover_text("Any colour");
+            ui.separator();
+        }
+        if uses.width {
+            label(ui, "Width");
+            ui.add(
+                egui::DragValue::new(&mut style.width)
+                    .range(1.0..=80.0)
+                    .speed(0.2)
+                    .suffix(" px"),
+            )
+            .on_hover_text("[ and ]");
+        }
+        if uses.font {
+            label(ui, "Size");
+            ui.add(
+                egui::DragValue::new(&mut style.font_size)
+                    .range(8.0..=300.0)
+                    .speed(0.5)
+                    .suffix(" px"),
+            )
+            .on_hover_text("[ and ]");
+        }
+        if uses.opacity {
+            label(ui, "Opacity");
+            let mut percent = (style.opacity * 100.0).round();
+            if ui
+                .add(
+                    egui::DragValue::new(&mut percent)
+                        .range(10.0..=100.0)
+                        .speed(0.5)
+                        .fixed_decimals(0)
+                        .suffix(" %"),
+                )
+                .changed()
+            {
+                style.opacity = percent / 100.0;
+            }
+        }
+        if uses.corner {
+            label(ui, "Corners");
+            ui.add(
+                egui::DragValue::new(&mut style.corner)
+                    .range(0.0..=100.0)
+                    .speed(0.3)
+                    .suffix(" px"),
+            );
+        }
+        if uses.head {
+            label(ui, "Head");
+            let mut percent = (style.head * 100.0).round();
+            if ui
+                .add(
+                    egui::DragValue::new(&mut percent)
+                        .range(30.0..=400.0)
+                        .speed(1.0)
+                        .fixed_decimals(0)
+                        .suffix(" %"),
+                )
+                .changed()
+            {
+                style.head = percent / 100.0;
+            }
+            ui.checkbox(&mut style.double_head, "Both ends");
+        }
+        if uses.fill {
+            let mut filled = style.fill.is_some();
+            if ui.checkbox(&mut filled, "Fill").changed() {
+                style.fill = if filled {
+                    let [r, g, b, _] = style.color.to_array();
+                    let alpha = if tool == Tool::Text { 255 } else { 70 };
+                    Some(Color32::from_rgba_unmultiplied(r, g, b, alpha))
+                } else {
+                    None
+                };
+            }
+            if let Some(fill) = &mut style.fill {
+                egui::color_picker::color_edit_button_srgba(
+                    ui,
+                    fill,
+                    egui::color_picker::Alpha::OnlyBlend,
+                )
+                .on_hover_text("Fill colour");
+            }
+        }
+        if uses.dashed {
+            ui.checkbox(&mut style.dashed, "Dashed");
+        }
+        if uses.mono {
+            ui.checkbox(&mut style.mono, "Monospace");
+        }
+        if uses.shadow {
+            ui.checkbox(&mut style.shadow, "Shadow");
+        }
+        if uses.strength {
+            match tool {
+                Tool::Blur => {
+                    label(ui, "Strength");
+                    ui.add(egui::Slider::new(&mut style.strength, 2.0..=60.0))
+                        .on_hover_text("[ and ]");
+                }
+                Tool::Pixelate => {
+                    label(ui, "Block size");
+                    ui.add(egui::Slider::new(&mut style.strength, 3.0..=60.0).suffix(" px"))
+                        .on_hover_text("[ and ]");
+                }
+                Tool::Spotlight => {
+                    label(ui, "Dim");
+                    let mut percent = style.strength * 100.0;
+                    if ui
+                        .add(egui::Slider::new(&mut percent, 10.0..=95.0).suffix(" %"))
+                        .changed()
+                    {
+                        style.strength = percent / 100.0;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if uses.round {
+            ui.checkbox(&mut style.round, "Round");
+        }
+    }
+
+    fn crop_controls(&mut self, ui: &mut egui::Ui, palette: &Palette) {
+        ui.label(RichText::new("Shape").color(palette.muted));
+        for aspect in Aspect::ALL {
+            ui.selectable_value(&mut self.settings.aspect, aspect, aspect.label());
+        }
+        ui.separator();
+        if ui
+            .add_enabled(self.crop_draft.is_some(), egui::Button::new("Apply crop"))
+            .on_hover_text("Enter")
+            .clicked()
+        {
+            self.apply_crop();
+        }
+        if ui
+            .add_enabled(self.doc.crop.is_some(), egui::Button::new("Reset"))
+            .clicked()
+        {
+            self.reset_crop();
+        }
+    }
+
     fn tool_list(&mut self, ui: &mut egui::Ui, palette: &Palette) {
         ui.add_space(8.0);
         for tool in Tool::ALL {
@@ -868,8 +1002,15 @@ impl Editor {
             } else if response.hovered() {
                 painter.rect_filled(rect, 5.0, palette.raised);
             }
+            let tint = if chosen { palette.accent } else { palette.text };
+            icons::paint(
+                painter,
+                Rect::from_center_size(pos2(rect.min.x + 18.0, rect.center().y), vec2(16.0, 16.0)),
+                tool,
+                tint,
+            );
             painter.text(
-                pos2(rect.min.x + 10.0, rect.center().y),
+                pos2(rect.min.x + 34.0, rect.center().y),
                 egui::Align2::LEFT_CENTER,
                 tool.label(),
                 FontId::proportional(13.0),
@@ -1045,8 +1186,8 @@ impl Editor {
                     let (paints, text_size) = render::shapes(
                         &item,
                         &map,
-                        &mut |text: String, size: f32, color: Color32| {
-                            painter.layout_no_wrap(text, FontId::proportional(size), color)
+                        &mut |text: String, font: FontId, color: Color32| {
+                            painter.layout_no_wrap(text, font, color)
                         },
                     );
                     if let Some(size) = text_size {
@@ -1177,14 +1318,18 @@ impl Editor {
         let lines: Vec<&str> = text.split('\n').collect();
         let last = lines.last().copied().unwrap_or("");
         let row = painter
-            .layout_no_wrap("Ag".into(), FontId::proportional(size), style.color)
+            .layout_no_wrap("Ag".into(), render::text_font(style, size), style.color)
             .size()
             .y;
         let width = if last.is_empty() {
             0.0
         } else {
             painter
-                .layout_no_wrap(last.to_string(), FontId::proportional(size), style.color)
+                .layout_no_wrap(
+                    last.to_string(),
+                    render::text_font(style, size),
+                    style.color,
+                )
                 .size()
                 .x
         };
@@ -1344,7 +1489,7 @@ impl Editor {
                 self.history.record(&self.doc);
                 self.doc.items.push(Annotation {
                     shape: Shape::Text(
-                        p - vec2(0.0, self.settings.style.font_size / 2.0),
+                        p - vec2(0.0, self.settings.style(Tool::Text).font_size / 2.0),
                         String::new(),
                     ),
                     style: self.style_for(Tool::Text),
@@ -1485,7 +1630,20 @@ impl Editor {
                 }
             }
             Gesture::Crop { start } => {
-                self.crop_draft = Some(Rect::from_two_pos(*start, p).intersect(full));
+                let end = match self.settings.aspect.ratio() {
+                    Some(ratio) => {
+                        // The longer drag direction decides, the other follows.
+                        let d = p - *start;
+                        let (w, h) = if d.x.abs() / ratio >= d.y.abs() {
+                            (d.x.abs(), d.x.abs() / ratio)
+                        } else {
+                            (d.y.abs() * ratio, d.y.abs())
+                        };
+                        *start + vec2(w * d.x.signum(), h * d.y.signum())
+                    }
+                    None => p,
+                };
+                self.crop_draft = Some(Rect::from_two_pos(*start, end).intersect(full));
             }
             Gesture::Pan => {}
         }
@@ -1623,5 +1781,45 @@ impl Editor {
 impl Mapping {
     pub fn image_pos(&self, p: Pos2) -> Pos2 {
         ((p - self.origin) / self.scale).to_pos2()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_survive_the_configuration_file() {
+        let mut settings = Settings {
+            tool: Tool::Arrow,
+            aspect: Aspect::SixteenNine,
+            ..Settings::default()
+        };
+        let arrow = settings.style_mut(Tool::Arrow);
+        arrow.color = Color32::from_rgb(1, 2, 3);
+        arrow.double_head = true;
+        arrow.head = 2.0;
+        settings.style_mut(Tool::Blur).strength = 25.0;
+
+        let config = crate::config::Config {
+            editor: settings.to_prefs(),
+            ..Default::default()
+        };
+        let text = toml::to_string(&config).unwrap();
+        let back: crate::config::Config = toml::from_str(&text).unwrap();
+        assert!(Settings::from_prefs(&back.editor) == settings);
+    }
+
+    #[test]
+    fn a_damaged_style_falls_back_to_something_usable() {
+        let text = "[editor]
+tool = \"nonsense\"
+[editor.styles.pen]
+width = -5.0
+";
+        let config: crate::config::Config = toml::from_str(text).unwrap();
+        let settings = Settings::from_prefs(&config.editor);
+        assert_eq!(settings.tool, Tool::Rectangle);
+        assert_eq!(settings.style(Tool::Pen).width, 1.0);
     }
 }

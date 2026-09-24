@@ -15,7 +15,7 @@ use egui::epaint::{
 use egui::{Pos2, Rect, Vec2, pos2, vec2};
 
 use super::effects;
-use super::model::{Annotation, Doc, HIGHLIGHTER_ALPHA, Shape};
+use super::model::{Annotation, Doc, Shape, Style};
 use crate::platform::Image;
 
 /// From image pixels to wherever the shapes are drawn.
@@ -42,8 +42,17 @@ impl Mapping {
     }
 }
 
-/// Lays out text at a size in target units.
-pub type Layout<'a> = dyn FnMut(String, f32, Color32) -> Arc<Galley> + 'a;
+/// Lays out text in a font at a size in target units.
+pub type Layout<'a> = dyn FnMut(String, FontId, Color32) -> Arc<Galley> + 'a;
+
+/// The font a text annotation asks for, at `size` target units.
+pub fn text_font(style: &Style, size: f32) -> FontId {
+    if style.mono {
+        FontId::monospace(size)
+    } else {
+        FontId::proportional(size)
+    }
+}
 
 /// Black or white, whichever reads better on `background`.
 pub fn contrast(background: Color32) -> Color32 {
@@ -58,84 +67,146 @@ pub fn contrast(background: Color32) -> Color32 {
 
 /// Padding around text with a background, relative to the font size.
 const TEXT_PAD: f32 = 0.25;
+/// How dark a shadow is, before the annotation's own opacity.
+const SHADOW_ALPHA: f32 = 0.45;
+
+/// A colour at a fraction of its opacity. egui colours are premultiplied,
+/// so every channel scales.
+fn faded(color: Color32, opacity: f32) -> Color32 {
+    color.gamma_multiply(opacity.clamp(0.0, 1.0))
+}
 
 /// The shapes for one annotation, plus the size of its text in image pixels
 /// where it has any. Effects and the spotlight have no shapes; they are
 /// pixels and handled separately.
 pub fn shapes(item: &Annotation, map: &Mapping, layout: &mut Layout) -> (Vec<Paint>, Option<Vec2>) {
+    let mut out = Vec::new();
+    if item.style.shadow {
+        // The same annotation in translucent black, a little down and right.
+        let offset = (item.style.width.max(item.style.font_size * 0.08)).clamp(2.0, 8.0);
+        let shade = Color32::from_black_alpha((SHADOW_ALPHA * 255.0) as u8);
+        let mut copy = item.clone();
+        copy.style.shadow = false;
+        copy.style.color = shade;
+        copy.style.fill = copy.style.fill.map(|_| shade);
+        let shifted = Mapping {
+            origin: map.origin + Vec2::splat(offset * map.scale),
+            scale: map.scale,
+        };
+        out.extend(plain_shapes(&copy, &shifted, layout, true).0);
+    }
+    let (main, text_size) = plain_shapes(item, map, layout, false);
+    out.extend(main);
+    (out, text_size)
+}
+
+fn plain_shapes(
+    item: &Annotation,
+    map: &Mapping,
+    layout: &mut Layout,
+    is_shadow: bool,
+) -> (Vec<Paint>, Option<Vec2>) {
     let s = map.scale;
     let style = &item.style;
     let mut out = Vec::new();
     let mut text_size = None;
-    let stroke = Stroke::new(style.width * s, style.color);
+    let color = faded(style.color, style.opacity);
+    let fill = style.fill.map(|f| faded(f, style.opacity));
+    let stroke = Stroke::new(style.width * s, color);
+    // Dashes scale with the line, so a thick line does not look dotted.
+    let (dash, gap) = (
+        (style.width * 3.0).max(6.0) * s,
+        (style.width * 2.0).max(4.0) * s,
+    );
 
     match &item.shape {
         Shape::Rectangle(r) => {
             let r = map.rect(*r);
-            if let Some(fill) = style.fill {
-                out.push(Paint::rect_filled(r, 0.0, fill));
+            let radius = (style.corner * s)
+                .min(r.width().min(r.height()) / 2.0)
+                .max(0.0);
+            if let Some(fill) = fill {
+                out.push(Paint::rect_filled(r, radius, fill));
             }
-            out.push(Paint::rect_stroke(r, 0.0, stroke, StrokeKind::Middle));
+            if style.dashed {
+                let path = rounded_rect_path(r, radius);
+                out.extend(Paint::dashed_line(&path, stroke, dash, gap));
+            } else {
+                out.push(Paint::rect_stroke(r, radius, stroke, StrokeKind::Middle));
+            }
         }
         Shape::Ellipse(r) => {
             let r = map.rect(*r);
-            if let Some(fill) = style.fill {
+            if let Some(fill) = fill {
                 out.push(Paint::ellipse_filled(r.center(), r.size() / 2.0, fill));
             }
-            out.push(Paint::ellipse_stroke(r.center(), r.size() / 2.0, stroke));
+            if style.dashed {
+                out.extend(Paint::dashed_line(&ellipse_path(r), stroke, dash, gap));
+            } else {
+                out.push(Paint::ellipse_stroke(r.center(), r.size() / 2.0, stroke));
+            }
         }
         Shape::Line(a, b) => {
             let (a, b) = (map.pos(*a), map.pos(*b));
-            out.push(Paint::line_segment([a, b], stroke));
-            out.push(Paint::circle_filled(a, stroke.width / 2.0, style.color));
-            out.push(Paint::circle_filled(b, stroke.width / 2.0, style.color));
+            if style.dashed {
+                out.extend(Paint::dashed_line(&[a, b], stroke, dash, gap));
+            } else {
+                out.push(Paint::line_segment([a, b], stroke));
+                out.push(Paint::circle_filled(a, stroke.width / 2.0, color));
+                out.push(Paint::circle_filled(b, stroke.width / 2.0, color));
+            }
         }
         Shape::Arrow(a, b) => {
             let (a, b) = (map.pos(*a), map.pos(*b));
             let length = (b - a).length();
             if length > 0.5 {
                 let dir = (b - a) / length;
-                let normal = vec2(-dir.y, dir.x);
-                let head = (item.head_length() * s).min(length);
-                let half = head * 0.55;
-                let base = b - dir * head;
-                // The shaft stops inside the head, so its flat end never
+                let heads = if style.double_head { 2.0 } else { 1.0 };
+                let head = (item.head_length() * s).min(length / heads);
+                // The shaft stops inside each head, so its flat end never
                 // pokes out beside the tip.
-                let shaft_end = b - dir * (head * 0.6);
-                if (shaft_end - a).dot(dir) > 0.0 {
-                    out.push(Paint::line_segment([a, shaft_end], stroke));
-                    out.push(Paint::circle_filled(a, stroke.width / 2.0, style.color));
+                let end = b - dir * (head * 0.6);
+                let start = if style.double_head {
+                    a + dir * (head * 0.6)
+                } else {
+                    a
+                };
+                if (end - start).dot(dir) > 0.0 {
+                    if style.dashed {
+                        out.extend(Paint::dashed_line(&[start, end], stroke, dash, gap));
+                    } else {
+                        out.push(Paint::line_segment([start, end], stroke));
+                        if !style.double_head {
+                            out.push(Paint::circle_filled(a, stroke.width / 2.0, color));
+                        }
+                    }
                 }
-                out.push(Paint::convex_polygon(
-                    vec![b, base + normal * half, base - normal * half],
-                    style.color,
-                    Stroke::NONE,
-                ));
+                out.push(arrow_head(b, dir, head, color));
+                if style.double_head {
+                    out.push(arrow_head(a, -dir, head, color));
+                }
             }
         }
         Shape::Pen(points) => {
             let points: Vec<Pos2> = points.iter().map(|p| map.pos(*p)).collect();
-            freehand(&mut out, points, stroke, true);
+            // Round joins only where they cannot show: overlapping see-through
+            // discs would leave darker spots along the stroke.
+            freehand(&mut out, points, stroke, style.opacity >= 0.999);
         }
         Shape::Highlighter(points) => {
             let points: Vec<Pos2> = points.iter().map(|p| map.pos(*p)).collect();
-            let [r, g, b, _] = style.color.to_array();
-            let color = Color32::from_rgba_unmultiplied(r, g, b, HIGHLIGHTER_ALPHA);
-            // No round joins here: overlapping see-through discs would leave
-            // darker spots along the stroke.
-            freehand(
-                &mut out,
-                points,
-                Stroke::new(item.stroke_width() * s, color),
-                false,
-            );
+            freehand(&mut out, points, stroke, false);
         }
         Shape::Text(at, text) => {
             let shown = if text.is_empty() { " " } else { text.as_str() };
-            let galley = layout(shown.to_string(), style.font_size * s, style.color);
+            let galley = layout(
+                shown.to_string(),
+                text_font(style, style.font_size * s),
+                color,
+            );
             let pos = map.pos(*at);
             let size = galley.size();
-            if let Some(fill) = style.fill {
+            if let Some(fill) = fill {
                 let pad = style.font_size * TEXT_PAD * s;
                 out.push(Paint::rect_filled(
                     Rect::from_min_size(pos, size).expand(pad),
@@ -144,26 +215,89 @@ pub fn shapes(item: &Annotation, map: &Mapping, layout: &mut Layout) -> (Vec<Pai
                 ));
             }
             text_size = Some(size / s);
-            out.push(Paint::galley(pos, galley, style.color));
+            out.push(Paint::galley(pos, galley, color));
         }
         Shape::Counter(center, number) => {
             let c = map.pos(*center);
             let radius = item.counter_radius() * s;
-            out.push(Paint::circle_filled(c, radius, style.color));
-            let galley = layout(
-                number.to_string(),
-                style.font_size * 0.9 * s,
-                contrast(style.color),
-            );
-            let size = galley.size();
-            out.push(Paint::galley(c - size / 2.0, galley, Color32::WHITE));
+            out.push(Paint::circle_filled(c, radius, color));
+            let digits = if is_shadow {
+                // A shadow needs only the disc.
+                None
+            } else {
+                Some(layout(
+                    number.to_string(),
+                    FontId::proportional(style.font_size * 0.9 * s),
+                    contrast(style.color),
+                ))
+            };
+            if let Some(galley) = digits {
+                let size = galley.size();
+                out.push(Paint::galley(c - size / 2.0, galley, Color32::WHITE));
+            }
         }
         Shape::Redact(r) => {
-            out.push(Paint::rect_filled(map.rect(*r), 0.0, Color32::BLACK));
+            out.push(Paint::rect_filled(
+                map.rect(*r),
+                0.0,
+                style.color.to_opaque(),
+            ));
         }
         Shape::Spotlight(_) | Shape::Blur(_) | Shape::Pixelate(_) => {}
     }
     (out, text_size)
+}
+
+fn arrow_head(tip: Pos2, dir: Vec2, length: f32, color: Color32) -> Paint {
+    let normal = vec2(-dir.y, dir.x);
+    let half = length * 0.55;
+    let base = tip - dir * length;
+    Paint::convex_polygon(
+        vec![tip, base + normal * half, base - normal * half],
+        color,
+        Stroke::NONE,
+    )
+}
+
+/// The outline of a rectangle with rounded corners, closed.
+fn rounded_rect_path(r: Rect, radius: f32) -> Vec<Pos2> {
+    if radius <= 0.5 {
+        return vec![
+            r.left_top(),
+            r.right_top(),
+            r.right_bottom(),
+            r.left_bottom(),
+            r.left_top(),
+        ];
+    }
+    let mut path = Vec::new();
+    let corners = [
+        (pos2(r.max.x - radius, r.min.y + radius), -90.0f32),
+        (pos2(r.max.x - radius, r.max.y - radius), 0.0),
+        (pos2(r.min.x + radius, r.max.y - radius), 90.0),
+        (pos2(r.min.x + radius, r.min.y + radius), 180.0),
+    ];
+    for (center, start) in corners {
+        for step in 0..=8 {
+            let angle = (start + step as f32 * 90.0 / 8.0).to_radians();
+            path.push(center + vec2(angle.cos(), angle.sin()) * radius);
+        }
+    }
+    path.push(path[0]);
+    path
+}
+
+/// The outline of an ellipse as a closed polygon, fine enough for dashes.
+fn ellipse_path(r: Rect) -> Vec<Pos2> {
+    let c = r.center();
+    let (a, b) = (r.width() / 2.0, r.height() / 2.0);
+    let steps = ((a + b) * 0.5).clamp(24.0, 180.0) as usize;
+    (0..=steps)
+        .map(|i| {
+            let t = i as f32 / steps as f32 * std::f32::consts::TAU;
+            c + vec2(t.cos() * a, t.sin() * b)
+        })
+        .collect()
 }
 
 fn freehand(out: &mut Vec<Paint>, points: Vec<Pos2>, stroke: Stroke, round_joins: bool) {
@@ -216,12 +350,10 @@ pub fn export(base: &Image, doc: &Doc, fonts: &mut Fonts) -> Image {
                 dim = dim.max(item.style.strength);
             }
             _ => {
-                let (paints, _) = shapes(item, &Mapping::IDENTITY, &mut |text, size, color| {
-                    fonts.with_pixels_per_point(1.0).layout_no_wrap(
-                        text,
-                        FontId::proportional(size),
-                        color,
-                    )
+                let (paints, _) = shapes(item, &Mapping::IDENTITY, &mut |text, font, color| {
+                    fonts
+                        .with_pixels_per_point(1.0)
+                        .layout_no_wrap(text, font, color)
                 });
                 rasterize(&mut out, paints, fonts);
             }
@@ -443,12 +575,60 @@ mod tests {
     }
 
     #[test]
+    fn every_style_option_renders() {
+        let base = canvas(120, 80);
+        let style = Style {
+            dashed: true,
+            shadow: true,
+            corner: 8.0,
+            double_head: true,
+            head: 1.5,
+            opacity: 0.5,
+            mono: true,
+            fill: Some(Color32::from_rgba_unmultiplied(0, 0, 255, 80)),
+            ..Style::default()
+        };
+        let r = Rect::from_min_size(pos2(10.0, 10.0), vec2(60.0, 40.0));
+        let doc = Doc {
+            items: vec![
+                Annotation {
+                    shape: Shape::Rectangle(r),
+                    style,
+                },
+                Annotation {
+                    shape: Shape::Ellipse(r),
+                    style,
+                },
+                Annotation {
+                    shape: Shape::Arrow(pos2(5.0, 70.0), pos2(110.0, 5.0)),
+                    style,
+                },
+                Annotation {
+                    shape: Shape::Line(pos2(5.0, 5.0), pos2(110.0, 70.0)),
+                    style,
+                },
+                Annotation {
+                    shape: Shape::Text(pos2(70.0, 40.0), "a/b".into()),
+                    style,
+                },
+                Annotation {
+                    shape: Shape::Counter(pos2(100.0, 60.0), 3),
+                    style,
+                },
+            ],
+            crop: None,
+        };
+        let out = export(&base, &doc, &mut export_fonts());
+        assert!(out.rgba.chunks(4).any(|p| p != [255, 255, 255, 255]));
+    }
+
+    #[test]
     fn crop_and_redaction_end_up_in_the_file() {
         let base = canvas(50, 40);
         let doc = Doc {
             items: vec![Annotation {
                 shape: Shape::Redact(Rect::from_min_size(pos2(0.0, 0.0), vec2(20.0, 20.0))),
-                style: Style::default(),
+                style: Style::for_tool(crate::editor::model::Tool::Redact),
             }],
             crop: Some(Rect::from_min_size(pos2(10.0, 10.0), vec2(30.0, 20.0))),
         };

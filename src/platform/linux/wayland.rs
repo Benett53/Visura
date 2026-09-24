@@ -20,6 +20,7 @@ struct Entry {
     title: String,
     class: String,
     pid: Option<u32>,
+    focused: bool,
 }
 
 /// Windows front to back plus the logical bounds of all monitors together.
@@ -29,9 +30,9 @@ struct Layout {
     bounds: Rect,
 }
 
-/// The windows on screen, front most first, in the pixels of a frame of
-/// `frame` size taken by the screenshot helper.
-pub fn windows(frame: (u32, u32)) -> Vec<WindowInfo> {
+/// The windows on screen, front most first, laid onto `area`: the desktop
+/// rectangle the screenshot covers, in the units of the pointer.
+pub fn windows(area: Rect) -> Vec<WindowInfo> {
     let layout = if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
         hyprland()
     } else if std::env::var_os("SWAYSOCK").is_some() {
@@ -40,8 +41,27 @@ pub fn windows(frame: (u32, u32)) -> Vec<WindowInfo> {
         None
     };
     layout
-        .map(|layout| to_screen(&layout, frame))
+        .map(|layout| to_screen(&layout, area))
         .unwrap_or_default()
+}
+
+/// The window that has the keyboard, where the compositor says so.
+pub fn focused(area: Rect) -> Option<WindowInfo> {
+    let mut layout = if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
+        let active = json("hyprctl", &["activewindow", "-j"])?;
+        let monitors = json("hyprctl", &["monitors", "-j"])?;
+        parse_hyprland(&serde_json::json!([active]), &monitors)?
+    } else if std::env::var_os("SWAYSOCK").is_some() {
+        let mut layout = parse_sway(&json("swaymsg", &["-t", "get_tree", "-r"])?)?;
+        layout.windows.retain(|w| w.focused);
+        layout
+    } else {
+        return None;
+    };
+    // hyprctl reports the active window whatever workspace it is on; the
+    // parser only keeps it when it is visible, which is what counts here.
+    layout.windows.truncate(1);
+    to_screen(&layout, area).into_iter().next()
 }
 
 fn json(program: &str, args: &[&str]) -> Option<Value> {
@@ -132,6 +152,7 @@ fn parse_hyprland(clients: &Value, monitors: &Value) -> Option<Layout> {
             title: text(&client["title"]),
             class: text(&client["class"]),
             pid: client["pid"].as_u64().map(|p| p as u32),
+            focused: recency == 0,
         };
         ranked.push(((group, recency), entry));
     }
@@ -177,6 +198,7 @@ fn parse_sway(tree: &Value) -> Option<Layout> {
                         title: text(&node["name"]),
                         class,
                         pid: node["pid"].as_u64().map(|p| p as u32),
+                        focused: node["focused"].as_bool().unwrap_or(false),
                     },
                 ));
             }
@@ -227,25 +249,27 @@ fn union(a: Rect, b: Rect) -> Rect {
     )
 }
 
-/// Scale the logical layout onto the helper's frame.
-fn to_screen(layout: &Layout, (width, height): (u32, u32)) -> Vec<WindowInfo> {
+/// Scale the compositor's logical layout onto the desktop rectangle `area`.
+/// Visura's own windows are left out; they are what the overlay is made of.
+fn to_screen(layout: &Layout, area: Rect) -> Vec<WindowInfo> {
     let bounds = layout.bounds;
-    if bounds.is_empty() || width == 0 || height == 0 {
+    if bounds.is_empty() || area.is_empty() {
         return Vec::new();
     }
-    let sx = width as f64 / bounds.w as f64;
-    let sy = height as f64 / bounds.h as f64;
-    let frame = Rect::new(0, 0, width as i32, height as i32);
+    let sx = area.w as f64 / bounds.w as f64;
+    let sy = area.h as f64 / bounds.h as f64;
+    let own = std::process::id();
     layout
         .windows
         .iter()
+        .filter(|entry| entry.pid != Some(own))
         .filter_map(|entry| {
             let r = entry.rect;
-            let x0 = ((r.x - bounds.x) as f64 * sx).round() as i32;
-            let y0 = ((r.y - bounds.y) as f64 * sy).round() as i32;
-            let x1 = ((r.x + r.w - bounds.x) as f64 * sx).round() as i32;
-            let y1 = ((r.y + r.h - bounds.y) as f64 * sy).round() as i32;
-            let rect = Rect::new(x0, y0, x1 - x0, y1 - y0).intersect(&frame);
+            let x0 = area.x + ((r.x - bounds.x) as f64 * sx).round() as i32;
+            let y0 = area.y + ((r.y - bounds.y) as f64 * sy).round() as i32;
+            let x1 = area.x + ((r.x + r.w - bounds.x) as f64 * sx).round() as i32;
+            let y1 = area.y + ((r.y + r.h - bounds.y) as f64 * sy).round() as i32;
+            let rect = Rect::new(x0, y0, x1 - x0, y1 - y0).intersect(&area);
             if rect.w < 8 || rect.h < 8 {
                 return None;
             }
@@ -292,7 +316,7 @@ mod tests {
         assert_eq!(titles, ["float", "tiled"]);
 
         // A scale of 2: the frame has twice the logical size.
-        let shown = to_screen(&layout, (3840, 2160));
+        let shown = to_screen(&layout, Rect::new(0, 0, 3840, 2160));
         assert_eq!(shown[0].rect, Rect::new(200, 200, 800, 600));
         assert_eq!(shown[0].app, "pavucontrol");
     }
