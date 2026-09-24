@@ -25,6 +25,8 @@ on the clipboard, and the window keeps the last few within reach.
 - Recent shots in the main window, the full library in a separate window with
   search and day headings
 - Drag a shot out of the list into another program
+- A built-in viewer with zoom, and an editor for arrows, shapes, text, step
+  numbers, highlighting, spotlight, blur, pixelation, black boxes and cropping
 - Delete moves to the recycle bin
 - Optionally, shots taken in a session go to the recycle bin when Visura quits,
   and shots older than a set number of days are moved there automatically
@@ -32,8 +34,8 @@ on the clipboard, and the window keeps the last few within reach.
   settings; a running Visura takes the shot
 - Dark, black and light themes, seven accents
 
-No upload, no account, no sharing, no image editor. Screenshots go into a
-folder and stay there.
+No upload, no account, no sharing. Screenshots go into a folder and stay
+there.
 
 The full library, with search and day headings, opens in a window of its own:
 
@@ -74,7 +76,8 @@ In the lists:
 
 | Action | How |
 |---|---|
-| Open | Double-click |
+| View | Double-click |
+| Edit | Select, then `Edit`, or right-click → `Edit` |
 | Select several | `Ctrl`-click, `Shift`-click, `Ctrl+A` |
 | Drag into another program | Drag a tile |
 | More | Right-click |
@@ -111,6 +114,41 @@ either: neither encoder emits a timestamp, a comment or EXIF.
 
 There is no index and no database. Whatever happens to the folder in a file
 manager is what the list shows next time it reads it.
+
+## Viewer and editor
+
+The viewer shows one shot: mouse wheel to zoom, drag to pan, `0` to fit, `1`
+for actual size, arrow keys for the previous and next shot, `E` to edit.
+
+![Editor](docs/editor.png)
+
+The editor keeps every change as a separate object until the result is saved,
+so anything can be selected, moved, resized, restyled or undone. Blur,
+pixelation and black boxes are burnt into the pixels on saving; the original
+text under them is not kept in the file.
+
+| Tool | Key | | Tool | Key |
+|---|---|---|---|---|
+| Select | `V` | | Step number | `N` |
+| Rectangle | `R` | | Spotlight | `S` |
+| Ellipse | `E` | | Blur | `B` |
+| Arrow | `A` | | Pixelate | `X` |
+| Line | `L` | | Black out | `D` |
+| Pen | `P` | | Crop | `C` |
+| Highlighter | `H` | | Text | `T` |
+
+| Action | How |
+|---|---|
+| Colour | `1` – `8`, or the swatches |
+| Thinner, thicker | `[` `]` |
+| Square, circle, 45° | Hold `Shift` |
+| Zoom | Mouse wheel, `Ctrl+0` fit, `Ctrl+1` actual size |
+| Pan | Middle mouse, or `Space` and drag |
+| Undo, redo | `Ctrl+Z`, `Ctrl+Y` |
+| Copy the result | `Ctrl+C` |
+| Save over the file | `Ctrl+S` |
+| Save a copy | `Ctrl+Shift+S` |
+| All shortcuts | `F1` |
 
 ## Configuration
 

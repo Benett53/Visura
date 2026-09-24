@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.0
+
+Added:
+
+- Image viewer. Double-click a shot to open it; zoom with the mouse wheel,
+  pan by dragging, arrow keys for the previous and next shot.
+- Image editor, opened with `Edit` on a selected shot or from the right-click
+  menu: rectangle, ellipse, arrow, line, pen, highlighter, text, step numbers,
+  spotlight, blur, pixelate, black box and crop. Colour, width, fill and text
+  size are adjustable, every object can be selected, moved, resized and
+  restyled afterwards, with undo and redo. The result can be copied, saved
+  over the file or saved as a copy. Every tool has a key; `F1` lists them.
+
+Changed:
+
+- Double-click opens the built-in viewer. The default program is still
+  available from the right-click menu.
+
+Fixed:
+
+- Long notices wrapped into a narrow column.
+
 ## 0.1.3
 
 Changed:

@@ -85,7 +85,7 @@ pub fn store(
     })
 }
 
-fn encode(image: &Image, format: Format, jpeg_quality: u8) -> Result<Vec<u8>, String> {
+pub fn encode(image: &Image, format: Format, jpeg_quality: u8) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     let mut cursor = std::io::Cursor::new(&mut out);
     match format {

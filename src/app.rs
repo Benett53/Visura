@@ -59,6 +59,12 @@ struct Pending {
     front_window: Option<WindowInfo>,
 }
 
+/// Which of the two built-in windows a shot should open in.
+pub enum OpenRequest {
+    View(PathBuf),
+    Edit(PathBuf),
+}
+
 pub struct App {
     pub config: Config,
     /// The settings being edited. Applied on save, discarded on cancel.
@@ -74,6 +80,13 @@ pub struct App {
     pub last_clicked: Option<(crate::ui::history::List, usize)>,
     pub search: String,
     pub renaming: Option<(PathBuf, String)>,
+    /// A shot to show or edit, opened on the next pass where a context for
+    /// its texture is at hand.
+    pub open_request: Option<OpenRequest>,
+    pub viewer: Option<ui::viewer::Viewer>,
+    pub editor: Option<crate::editor::Editor>,
+    /// The editor's last tool and settings, for the next edit.
+    pub editor_settings: crate::editor::Settings,
     pub pending_delete: Vec<PathBuf>,
 
     pub thumbs: Thumbs,
@@ -149,6 +162,9 @@ impl App {
 
         let (config, problem) = Config::load();
         ui::theme::apply(&cc.egui_ctx, config.ui.theme, config.ui.accent);
+        // Ctrl+plus and Ctrl+minus zoom the image in the viewer and editor,
+        // not the whole interface.
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
 
         let mut hotkeys = hotkeys::Manager::new(cc.egui_ctx.clone());
         hotkeys.apply(&config.hotkeys);
@@ -181,6 +197,10 @@ impl App {
             last_clicked: None,
             search: String::new(),
             renaming: None,
+            open_request: None,
+            viewer: None,
+            editor: None,
+            editor_settings: crate::editor::Settings::default(),
             pending_delete: Vec::new(),
             thumbs: Thumbs::new(),
             hotkeys,
@@ -333,6 +353,23 @@ impl App {
             }
             Err(e) => self.warn(format!("Deleting failed: {e}")),
         }
+    }
+
+    /// Where a shot sits in the library, and how many there are.
+    pub fn position_of(&self, path: &PathBuf) -> Option<(usize, usize)> {
+        self.shots
+            .iter()
+            .position(|s| &s.path == path)
+            .map(|i| (i, self.shots.len()))
+    }
+
+    /// The shot `step` places away from `path` in the library.
+    pub fn neighbour_of(&self, path: &PathBuf, step: i32) -> Option<PathBuf> {
+        let (index, total) = self.position_of(path)?;
+        let target = index as i64 + step as i64;
+        (0..total as i64)
+            .contains(&target)
+            .then(|| self.shots[target as usize].path.clone())
     }
 
     pub fn copy_image_of(&mut self, path: &PathBuf) {

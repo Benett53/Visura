@@ -356,7 +356,7 @@ impl App {
         }
 
         if response.double_clicked() {
-            crate::platform::open_path(&path);
+            self.open_request = Some(crate::app::OpenRequest::View(path.clone()));
         }
 
         if response.drag_started() {
@@ -376,9 +376,18 @@ impl App {
                 self.selection.insert(path.clone());
             }
             if ui.button("Open").clicked() {
+                self.open_request = Some(crate::app::OpenRequest::View(path.clone()));
+                ui.close();
+            }
+            if ui.button("Edit").clicked() {
+                self.open_request = Some(crate::app::OpenRequest::Edit(path.clone()));
+                ui.close();
+            }
+            if ui.button("Open with default program").clicked() {
                 crate::platform::open_path(&path);
                 ui.close();
             }
+            ui.separator();
             if ui.button("Show in folder").clicked() {
                 crate::platform::reveal_in_file_manager(&path);
                 ui.close();

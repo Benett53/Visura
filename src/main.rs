@@ -6,6 +6,7 @@ mod app;
 mod capture;
 mod clipboard;
 mod config;
+mod editor;
 mod hotkeys;
 mod icon;
 mod library;

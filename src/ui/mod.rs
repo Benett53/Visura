@@ -1,12 +1,14 @@
 //! The window: sidebar, pages, notices and the dialogs.
 
+pub mod canvas;
 pub mod history;
 pub mod settings;
 pub mod theme;
+pub mod viewer;
 
 use egui::{Align, Align2, CornerRadius, FontId, Id, Layout, RichText, Sense, vec2};
 
-use crate::app::{App, Page};
+use crate::app::{App, OpenRequest, Page};
 use crate::capture::Mode;
 use crate::hotkeys;
 
@@ -34,6 +36,154 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
         rename_dialog(app, &ui.ctx().clone());
     }
     history_window(app, ui);
+    open_requested(app, ui.ctx());
+    viewer_window(app, ui);
+    editor_window(app, ui);
+}
+
+// -------------------------------------------------------- viewer and editor --
+
+const VIEWER: &str = "visura-viewer";
+const EDITOR: &str = "visura-editor";
+
+fn open_requested(app: &mut App, ctx: &egui::Context) {
+    let Some(request) = app.open_request.take() else {
+        return;
+    };
+    match request {
+        OpenRequest::View(path) => {
+            app.viewer = Some(viewer::Viewer::open(ctx, path));
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::from_hash_of(VIEWER),
+                egui::ViewportCommand::Focus,
+            );
+        }
+        OpenRequest::Edit(path) => {
+            let editor_id = egui::ViewportId::from_hash_of(EDITOR);
+            if let Some(open) = &app.editor {
+                if open.path == path {
+                    ctx.send_viewport_cmd_to(editor_id, egui::ViewportCommand::Focus);
+                    return;
+                }
+                if open.is_dirty() {
+                    app.warn("Save or close the edit that is open first");
+                    ctx.send_viewport_cmd_to(editor_id, egui::ViewportCommand::Focus);
+                    return;
+                }
+            }
+            match crate::editor::Editor::open(
+                ctx,
+                path,
+                app.editor_settings,
+                app.config.jpeg_quality,
+            ) {
+                Ok(editor) => {
+                    app.editor = Some(editor);
+                    ctx.send_viewport_cmd_to(editor_id, egui::ViewportCommand::Focus);
+                }
+                Err(e) => app.warn(e),
+            }
+        }
+    }
+}
+
+fn viewer_window(app: &mut App, ui: &mut egui::Ui) {
+    let Some(open) = &app.viewer else {
+        return;
+    };
+    let path = open.path.clone();
+    let ctx = ui.ctx().clone();
+    let builder = egui::ViewportBuilder::default()
+        .with_title(open.title())
+        .with_inner_size([1100.0, 760.0])
+        .with_min_inner_size([420.0, 300.0]);
+    let position = app.position_of(&path);
+    let palette = app.palette();
+    let mut actions = Vec::new();
+
+    ctx.show_viewport_immediate(egui::ViewportId::from_hash_of(VIEWER), builder, |ui, _| {
+        if ui.ctx().input(|i| i.viewport().close_requested()) {
+            actions.push(viewer::Action::Close);
+            return;
+        }
+        if let Some(viewer) = &mut app.viewer {
+            actions = viewer.ui(ui, &palette, position);
+        }
+    });
+
+    for action in actions {
+        match action {
+            viewer::Action::Close => app.viewer = None,
+            viewer::Action::Edit(path) => {
+                app.viewer = None;
+                app.open_request = Some(OpenRequest::Edit(path));
+            }
+            viewer::Action::Step(step) => {
+                if let Some(next) = app.neighbour_of(&path, step) {
+                    app.selection.clear();
+                    app.selection.insert(next.clone());
+                    app.viewer = Some(viewer::Viewer::open(&ctx, next));
+                }
+            }
+            viewer::Action::Copy(path) => app.copy_image_of(&path),
+            viewer::Action::OpenExternally(path) => crate::platform::open_path(&path),
+        }
+    }
+}
+
+fn editor_window(app: &mut App, ui: &mut egui::Ui) {
+    let Some(open) = &app.editor else {
+        return;
+    };
+    let ctx = ui.ctx().clone();
+    let builder = egui::ViewportBuilder::default()
+        .with_title(open.title())
+        .with_inner_size([1280.0, 820.0])
+        .with_min_inner_size([760.0, 480.0]);
+    let palette = app.palette();
+    let mut actions = Vec::new();
+
+    ctx.show_viewport_immediate(egui::ViewportId::from_hash_of(EDITOR), builder, |ui, _| {
+        let inner = ui.ctx().clone();
+        let Some(editor) = &mut app.editor else {
+            return;
+        };
+        if inner.input(|i| i.viewport().close_requested()) {
+            if editor.is_dirty() {
+                inner.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            }
+            editor.request_close(&mut actions);
+        }
+        actions.extend(editor.ui(ui, &palette));
+    });
+
+    for action in actions {
+        match action {
+            crate::editor::Action::Close => {
+                if let Some(editor) = app.editor.take() {
+                    app.editor_settings = editor.settings;
+                }
+            }
+            crate::editor::Action::Saved(path) => {
+                app.thumbs.forget(&path);
+                app.refresh();
+                app.selection.clear();
+                app.selection.insert(path);
+            }
+            crate::editor::Action::Note(text) => {
+                if let Some(editor) = &mut app.editor {
+                    editor.flash(text.clone(), false);
+                }
+                app.note(text);
+            }
+            crate::editor::Action::Warn(text) => {
+                if let Some(editor) = &mut app.editor {
+                    editor.flash(text.clone(), true);
+                }
+                app.warn(text);
+            }
+        }
+    }
 }
 
 // ------------------------------------------------------------------ sidebar --
@@ -178,7 +328,10 @@ fn selection_bar(app: &mut App, ui: &mut egui::Ui, id: Id) {
             if count == 1 {
                 let path = app.selected_paths().remove(0);
                 if ui.button("Open").clicked() {
-                    crate::platform::open_path(&path);
+                    app.open_request = Some(crate::app::OpenRequest::View(path.clone()));
+                }
+                if ui.button("Edit").clicked() {
+                    app.open_request = Some(crate::app::OpenRequest::Edit(path.clone()));
                 }
                 if ui.button("Copy image").clicked() {
                     app.copy_image_of(&path);
@@ -251,7 +404,10 @@ fn toast(app: &mut App, ui: &mut egui::Ui, full: egui::Rect) {
                 .stroke(egui::Stroke::new(1.0, colour.gamma_multiply(0.6)))
                 .corner_radius(CornerRadius::same(7))
                 .show(ui, |ui| {
-                    ui.label(RichText::new(text).color(palette.text));
+                    ui.add(
+                        egui::Label::new(RichText::new(text).color(palette.text))
+                            .wrap_mode(egui::TextWrapMode::Extend),
+                    );
                 });
         });
     // Let the notice disappear on its own rather than on the next mouse move.
