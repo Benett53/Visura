@@ -132,9 +132,13 @@ pub struct Overlay {
     pub crosshair: bool,
     /// Outline the window under the cursor and capture it on a plain click.
     pub detect_windows: bool,
-    /// Within a window, outline a pane on its own where there is one, such as
-    /// a web page without the browser's tabs and address bar.
-    pub detect_areas: bool,
+    /// A click takes the pane under the cursor, such as a web page without the
+    /// browser's tabs and address bar, rather than the whole window. Holding
+    /// Ctrl swaps the two either way.
+    ///
+    /// Off by default: the whole window is what most shots want, and some
+    /// programs (Explorer among them) are covered by panes edge to edge.
+    pub panes_first: bool,
     pub show_hints: bool,
     /// Hide the Visura window before capturing so it stays out of the shot.
     pub hide_self: bool,
@@ -147,7 +151,7 @@ impl Default for Overlay {
             magnifier: false,
             crosshair: true,
             detect_windows: true,
-            detect_areas: true,
+            panes_first: false,
             show_hints: false,
             hide_self: false,
         }
@@ -218,6 +222,9 @@ pub struct Config {
     pub anonymous_names: bool,
     pub format: Format,
     pub jpeg_quality: u8,
+    /// Shots older than this many days go to the recycle bin; 0 keeps them
+    /// forever.
+    pub keep_days: u32,
     pub autostart: bool,
     pub after: AfterCapture,
     pub hotkeys: Hotkeys,
@@ -238,6 +245,7 @@ impl Default for Config {
             anonymous_names: false,
             format: Format::Png,
             jpeg_quality: 90,
+            keep_days: 0,
             autostart: false,
             after: AfterCapture::default(),
             hotkeys: Hotkeys::default(),

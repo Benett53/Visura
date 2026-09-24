@@ -179,6 +179,26 @@ impl App {
                     ui.add(egui::Slider::new(&mut self.draft.jpeg_quality, 40..=100).suffix(" %"));
                 });
             }
+
+            ui.add_space(10.0);
+            let mut keep = self.draft.keep_days > 0;
+            let mut days = if keep { self.draft.keep_days } else { 30 };
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut keep, "Move shots older than");
+                ui.add_enabled(keep, egui::DragValue::new(&mut days).range(1..=3650));
+                ui.label("days to the recycle bin");
+            });
+            self.draft.keep_days = if keep { days } else { 0 };
+            if keep {
+                ui.label(
+                    RichText::new(
+                        "    Checked at start and once an hour. This covers every image in \
+                         the folder above, also ones Visura did not take.",
+                    )
+                    .color(palette.muted)
+                    .size(11.5),
+                );
+            }
         });
     }
 
@@ -297,8 +317,15 @@ impl App {
             );
             ui.add_enabled_ui(self.draft.overlay.detect_windows, |ui| {
                 ui.checkbox(
-                    &mut self.draft.overlay.detect_areas,
-                    "Outline panes inside a window, such as a web page without the browser",
+                    &mut self.draft.overlay.panes_first,
+                    "Click takes the pane under the cursor, such as a web page without the browser",
+                );
+                ui.label(
+                    RichText::new(
+                        "Hold Ctrl in the overlay to switch between pane and whole window.",
+                    )
+                    .color(palette.muted)
+                    .size(11.5),
                 );
             });
             ui.checkbox(&mut self.draft.overlay.crosshair, "Crosshair");

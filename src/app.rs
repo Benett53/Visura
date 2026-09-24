@@ -3,8 +3,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::capture::{self, Mode};
@@ -109,14 +108,22 @@ pub struct App {
     /// Which shortcut is currently listening for a key press.
     pub recording: Option<hotkeys::Action>,
     tray: Option<tray::Tray>,
-    show_requested: Arc<AtomicBool>,
+    /// Requests handed over by a second copy of the program, such as
+    /// `visura --shot region` bound to a key in the desktop settings.
+    requests: Arc<Mutex<Vec<platform::Request>>>,
+    /// When shots past `keep_days` were last looked for.
+    last_sweep: Option<Instant>,
     visible: bool,
     quitting: bool,
     startup_note: Option<String>,
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, start_hidden: bool) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        start_hidden: bool,
+        first_request: Option<platform::Request>,
+    ) -> Self {
         // The exact window handle, rather than one found by guesswork later.
         #[cfg(windows)]
         {
@@ -127,6 +134,18 @@ impl App {
                 platform::set_main_window(win32.hwnd.get());
             }
         }
+        // On X11, so a drag out does not offer Visura itself as a target.
+        #[cfg(unix)]
+        {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(handle) = cc.window_handle() {
+                match handle.as_raw() {
+                    RawWindowHandle::Xlib(xlib) => platform::set_main_window(xlib.window as u32),
+                    RawWindowHandle::Xcb(xcb) => platform::set_main_window(xcb.window.get()),
+                    _ => {}
+                }
+            }
+        }
 
         let (config, problem) = Config::load();
         ui::theme::apply(&cc.egui_ctx, config.ui.theme, config.ui.accent);
@@ -134,12 +153,16 @@ impl App {
         let mut hotkeys = hotkeys::Manager::new(cc.egui_ctx.clone());
         hotkeys.apply(&config.hotkeys);
 
-        let show_requested = Arc::new(AtomicBool::new(false));
+        // A shot asked for on the command line of this very start is handled
+        // like one handed over later.
+        let requests = Arc::new(Mutex::new(Vec::from_iter(first_request)));
         if let Some(guard) = crate::INSTANCE.lock().ok().and_then(|mut g| g.take()) {
-            let flag = show_requested.clone();
+            let queue = requests.clone();
             let ctx = cc.egui_ctx.clone();
-            platform::spawn_show_listener(guard, move || {
-                flag.store(true, Ordering::SeqCst);
+            platform::spawn_request_listener(guard, move |request| {
+                if let Ok(mut queue) = queue.lock() {
+                    queue.push(request);
+                }
                 ctx.request_repaint();
             });
         }
@@ -175,7 +198,8 @@ impl App {
             history_open: false,
             recording: None,
             tray,
-            show_requested,
+            requests,
+            last_sweep: None,
             visible: !start_hidden,
             quitting: false,
             startup_note: problem,
@@ -381,8 +405,37 @@ impl App {
         }
     }
 
+    /// Move shots past the configured age to the recycle bin. Runs soon after
+    /// the start and then once an hour, which is plenty for a limit counted in
+    /// days.
+    fn sweep_old_shots(&mut self) {
+        const EVERY: Duration = Duration::from_secs(60 * 60);
+        if self.last_sweep.is_some_and(|at| at.elapsed() < EVERY) {
+            return;
+        }
+        self.last_sweep = Some(Instant::now());
+        let days = self.config.keep_days;
+        let expired = library::older_than(&self.shots, std::time::SystemTime::now(), days);
+        if expired.is_empty() {
+            return;
+        }
+        match library::delete(&expired) {
+            Ok(()) => {
+                library::prune_empty_dirs(&self.config.folder);
+                self.refresh();
+                let count = expired.len();
+                let shots = if count == 1 { "shot" } else { "shots" };
+                self.note(format!(
+                    "Moved {count} {shots} older than {days} days to the recycle bin"
+                ));
+            }
+            Err(e) => self.warn(format!("Old shots could not be removed: {e}")),
+        }
+    }
+
     pub fn apply_settings(&mut self, ctx: &egui::Context) {
         let folder_changed = self.draft.folder != self.config.folder;
+        let keep_changed = self.draft.keep_days != self.config.keep_days;
         let hotkeys_changed = self.draft.hotkeys != self.config.hotkeys;
         let theme_changed = self.draft.ui.theme != self.config.ui.theme
             || self.draft.ui.accent != self.config.ui.accent;
@@ -403,6 +456,10 @@ impl App {
         }
         if folder_changed {
             self.refresh();
+        }
+        if folder_changed || keep_changed {
+            // The next pass checks straight away rather than within the hour.
+            self.last_sweep = None;
         }
         if theme_changed {
             // egui caches the whole style, so the new colours only reach
@@ -762,14 +819,28 @@ impl eframe::App for App {
             self.minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
         }
 
-        if self.show_requested.swap(false, Ordering::SeqCst) {
-            self.refresh();
-            self.show_window(ctx);
+        let requests = match self.requests.lock() {
+            Ok(mut queue) => std::mem::take(&mut *queue),
+            Err(_) => Vec::new(),
+        };
+        for request in requests {
+            match request {
+                platform::Request::Show => {
+                    self.refresh();
+                    self.show_window(ctx);
+                }
+                platform::Request::Region => self.request_capture(Mode::Region),
+                platform::Request::Window => self.request_capture(Mode::ActiveWindow),
+                platform::Request::Screen => self.request_capture(Mode::Fullscreen),
+            }
         }
 
         self.tick_tray(ctx);
         self.tick_hotkeys(ctx);
         self.tick_capture(ctx);
+        if self.pending.is_none() && self.overlay.is_none() {
+            self.sweep_old_shots();
+        }
 
         if self.quitting {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);

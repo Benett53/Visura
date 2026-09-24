@@ -175,6 +175,53 @@ impl LocalTime {
     }
 }
 
+/// A `file://` URI for an absolute path given as raw bytes. Everything but
+/// unreserved characters and the slashes is percent encoded, which is what
+/// file managers expect in a `text/uri-list`.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn file_uri(path: &[u8]) -> String {
+    let mut uri = String::from("file://");
+    for &byte in path {
+        if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
+            uri.push(byte as char);
+        } else {
+            uri.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    uri
+}
+
+/// What a second copy of the program asks the running one to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Request {
+    Show,
+    Region,
+    Window,
+    Screen,
+}
+
+impl Request {
+    pub const ALL: [Request; 4] = [
+        Request::Show,
+        Request::Region,
+        Request::Window,
+        Request::Screen,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Request::Show => "show",
+            Request::Region => "region",
+            Request::Window => "window",
+            Request::Screen => "screen",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|r| r.name() == text.trim())
+    }
+}
+
 /// Fall back to a sensible picture folder when the configuration is empty.
 pub fn default_screenshot_dir() -> PathBuf {
     pictures_dir().join("Visura")
@@ -183,6 +230,30 @@ pub fn default_screenshot_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_uris_escape_what_needs_escaping() {
+        assert_eq!(file_uri(b"/home/a/shot.png"), "file:///home/a/shot.png");
+        assert_eq!(
+            file_uri("/tmp/my shot #1 ä.png".as_bytes()),
+            "file:///tmp/my%20shot%20%231%20%C3%A4.png"
+        );
+    }
+
+    #[test]
+    fn requests_survive_the_trip_as_text() {
+        for request in Request::ALL {
+            assert_eq!(Request::parse(request.name()), Some(request));
+        }
+        assert_eq!(
+            Request::parse(
+                "region
+"
+            ),
+            Some(Request::Region)
+        );
+        assert_eq!(Request::parse("everything"), None);
+    }
 
     fn browser() -> WindowInfo {
         WindowInfo {

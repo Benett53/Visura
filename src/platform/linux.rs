@@ -9,10 +9,10 @@
 //! which yields the same frozen frame the overlay needs. Window outlines are
 //! not available that way, so the overlay simply does not draw them.
 
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
 use x11rb::connection::Connection;
@@ -23,7 +23,12 @@ use x11rb::protocol::xproto::{
 };
 use x11rb::rust_connection::RustConnection;
 
-use super::{Image, LocalTime, Rect, WindowInfo};
+use super::{Image, LocalTime, Rect, Request, WindowInfo};
+
+mod wayland;
+mod xdnd;
+
+pub use xdnd::set_main_window;
 
 // ------------------------------------------------------------- connection ----
 
@@ -131,10 +136,10 @@ pub fn ctrl_key_down() -> bool {
     pointer_mask() & CONTROL != 0
 }
 
-/// Whether a Super key is held. egui has no modifier for it.
 /// Only Windows needs telling; see the Windows version.
 pub fn set_overlay_active(_active: bool) {}
 
+/// Whether a Super key is held. egui has no modifier for it.
 pub fn super_key_down() -> bool {
     let Some(d) = display() else {
         return false;
@@ -287,7 +292,12 @@ pub fn capture_screen() -> Result<(Image, Rect), String> {
         "no X11 screen".to_string()
     } else {
         match capture_rect(screen) {
-            Ok(image) => return Ok((image, screen)),
+            Ok(image) => {
+                if let Ok(mut frame) = HELPER_FRAME.lock() {
+                    *frame = None;
+                }
+                return Ok((image, screen));
+            }
             Err(e) => e,
         }
     };
@@ -295,6 +305,9 @@ pub fn capture_screen() -> Result<(Image, Rect), String> {
     match capture_via_helper() {
         Ok(image) => {
             let rect = Rect::new(0, 0, image.width as i32, image.height as i32);
+            if let Ok(mut frame) = HELPER_FRAME.lock() {
+                *frame = Some((image.width, image.height));
+            }
             Ok((image, rect))
         }
         Err(helper_error) => Err(format!(
@@ -302,6 +315,10 @@ pub fn capture_screen() -> Result<(Image, Rect), String> {
         )),
     }
 }
+
+/// Size of the last frame that came from a screenshot helper rather than from
+/// X11, which means a Wayland session. `None` after an X11 capture.
+static HELPER_FRAME: Mutex<Option<(u32, u32)>> = Mutex::new(None);
 
 /// Ask whatever screenshot helper the desktop ships for a full screen PNG.
 ///
@@ -393,6 +410,12 @@ fn cardinals(d: &Display, window: Window, property: u32) -> Option<Vec<u32>> {
 /// bottom to top, so it is reversed here. Without a compliant window manager
 /// the list comes back empty and the overlay simply shows no highlight.
 pub fn windows_in_z_order() -> Vec<WindowInfo> {
+    // On Wayland the X server only knows the XWayland windows, and not where
+    // they really are; the compositor is asked instead where it answers.
+    let helper_frame = HELPER_FRAME.lock().ok().and_then(|frame| *frame);
+    if let Some(frame) = helper_frame {
+        return wayland::windows(frame);
+    }
     let Some(d) = display() else {
         return Vec::new();
     };
@@ -533,24 +556,32 @@ pub fn local_from_system_time(t: SystemTime) -> LocalTime {
 
 // ------------------------------------------------------------ drag source ----
 
-/// X11 drag and drop (XDND) needs the drag source to own a selection, grab the
-/// pointer and answer messages from the window under the cursor for the whole
-/// drag. winit owns the event loop and does not expose enough of it to do that
-/// correctly, so this puts the file on the clipboard instead and the caller
-/// tells the user. Tracked as a known limitation.
+/// Drag files out to another program over XDND; see `xdnd`.
+///
+/// Where that cannot start, for example on a Wayland session without
+/// XWayland, the paths go to the clipboard instead and the caller says so.
 pub fn start_file_drag(paths: &[PathBuf]) -> Result<(), String> {
-    let uris: Vec<String> = paths
-        .iter()
-        .map(|p| format!("file://{}", p.display()))
-        .collect();
-    if uris.is_empty() {
+    use std::os::unix::ffi::OsStrExt as _;
+    if paths.is_empty() {
         return Err("nothing to drag".into());
     }
+    let uris: Vec<String> = paths
+        .iter()
+        .map(|p| super::file_uri(p.as_os_str().as_bytes()))
+        .collect();
+    let plain: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+
+    let drag_error = match xdnd::prepare(&uris, &plain).and_then(xdnd::start) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
     let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     clipboard
         .set_text(uris.join("\n"))
         .map_err(|e| e.to_string())?;
-    Err("drag out is not available on X11; the file path was copied instead".into())
+    Err(format!(
+        "dragging out did not work ({drag_error}); the file path was copied instead"
+    ))
 }
 
 // ----------------------------------------------------------------- shell ----
@@ -731,9 +762,9 @@ impl Drop for InstanceGuard {
     }
 }
 
-/// Returns `None` when another copy already runs; that copy is asked to show
-/// its window instead.
-pub fn acquire_single_instance() -> Option<InstanceGuard> {
+/// Returns `None` when another copy already runs; that copy is handed the
+/// request instead.
+pub fn acquire_single_instance(request: Request) -> Option<InstanceGuard> {
     let path = socket_path();
     match UnixListener::bind(&path) {
         Ok(listener) => Some(InstanceGuard(listener)),
@@ -741,7 +772,7 @@ pub fn acquire_single_instance() -> Option<InstanceGuard> {
             // Either a live instance or a socket left behind by a crash.
             match UnixStream::connect(&path) {
                 Ok(mut stream) => {
-                    let _ = stream.write_all(b"show");
+                    let _ = stream.write_all(request.name().as_bytes());
                     None
                 }
                 Err(_) => {
@@ -753,17 +784,23 @@ pub fn acquire_single_instance() -> Option<InstanceGuard> {
     }
 }
 
-/// Call `on_show` whenever another copy of the program is started and asks
-/// this one to come to the front. The guard is kept alive by the thread.
-pub fn spawn_show_listener(guard: InstanceGuard, on_show: impl Fn() + Send + 'static) {
+/// Call `on_request` whenever another copy of the program is started and
+/// hands this one a request. The guard is kept alive by the thread.
+pub fn spawn_request_listener(guard: InstanceGuard, on_request: impl Fn(Request) + Send + 'static) {
     std::thread::Builder::new()
         .name("visura-instance".into())
         .spawn(move || {
             let guard = guard;
             for stream in guard.0.incoming() {
-                if stream.is_ok() {
-                    on_show();
-                }
+                let Ok(mut stream) = stream else {
+                    continue;
+                };
+                // The sender writes one word and closes. Anything unreadable
+                // is taken as the oldest request there is: show the window.
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
+                let mut text = String::new();
+                let _ = (&mut stream).take(64).read_to_string(&mut text);
+                on_request(Request::parse(&text).unwrap_or(Request::Show));
             }
         })
         .ok();

@@ -48,10 +48,9 @@ pub struct Overlay {
     outline: Option<[f32; 4]>,
     /// Frames in a row in which the window did not cover the screen.
     unsettled_frames: u32,
-    /// Ctrl is held: take the whole window even where a pane is outlined.
-    /// Some programs put their title bar inside a pane, and without this the
-    /// window as a whole would be out of reach there.
-    whole_window: bool,
+    /// Ctrl is held: switch between the whole window and the pane under the
+    /// cursor, whichever of the two a click would not take otherwise.
+    ctrl_held: bool,
     /// Button state last frame, to turn the polled state into presses and
     /// releases.
     primary_was_down: bool,
@@ -85,7 +84,7 @@ impl Overlay {
             cursor: crate::platform::cursor_position(),
             outline: None,
             unsettled_frames: 0,
-            whole_window: false,
+            ctrl_held: false,
             primary_was_down,
             secondary_was_down,
             accent: Color32::from_rgb(accent[0], accent[1], accent[2]),
@@ -109,7 +108,7 @@ impl Overlay {
     /// pane inside it such as a web page, or the window as a whole.
     fn target_under_cursor(&self) -> Option<(WindowInfo, Rect)> {
         let window = self.window_under_cursor()?;
-        let use_areas = self.config.detect_areas && !self.whole_window;
+        let use_areas = self.config.panes_first != self.ctrl_held;
         let target = window.target_at(self.cursor.0, self.cursor.1, use_areas);
         Some((window.clone(), target))
     }
@@ -200,7 +199,7 @@ impl Overlay {
             return Outcome::Pending;
         }
         self.unsettled_frames = 0;
-        self.whole_window = crate::platform::ctrl_key_down();
+        self.ctrl_held = crate::platform::ctrl_key_down();
 
         // The window is meant to cover the whole virtual desktop, but its real
         // size is whatever the window manager granted. Mapping from the actual
@@ -500,10 +499,10 @@ impl Overlay {
     }
 
     fn draw_hints(&self, painter: &egui::Painter, area: UiRect) {
-        let hint = if self.config.detect_windows && self.config.detect_areas {
+        let hint = if self.config.detect_windows && self.config.panes_first {
             "Drag: region   ·   Click: outlined part   ·   Ctrl: whole window   ·   Space: whole screen   ·   Esc: cancel"
         } else if self.config.detect_windows {
-            "Drag: region   ·   Click: window   ·   Space: whole screen   ·   Esc: cancel"
+            "Drag: region   ·   Click: window   ·   Ctrl: part of the window   ·   Space: whole screen   ·   Esc: cancel"
         } else {
             "Drag: region   ·   Space: whole screen   ·   Esc: cancel"
         };

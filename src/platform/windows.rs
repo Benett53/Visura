@@ -9,7 +9,7 @@ use std::time::SystemTime;
 
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, FILETIME, HANDLE, HWND, LPARAM, LRESULT, MAX_PATH, POINT,
-    RECT, WPARAM,
+    RECT, WAIT_OBJECT_0, WPARAM,
 };
 use windows::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_TRANSITIONS_FORCEDISABLED,
@@ -34,7 +34,7 @@ use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS};
 use windows::Win32::System::Threading::{
     CreateEventW, CreateMutexW, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    QueryFullProcessImageNameW, SetEvent, WaitForSingleObject,
+    QueryFullProcessImageNameW, SetEvent, WaitForMultipleObjects,
 };
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -58,7 +58,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{BOOL, HRESULT, PCWSTR, PWSTR, implement};
 
-use super::{Image, LocalTime, Rect, WindowInfo};
+use super::{Image, LocalTime, Rect, Request, WindowInfo};
 
 fn wide(s: impl AsRef<std::ffi::OsStr>) -> Vec<u16> {
     s.as_ref().encode_wide().chain(std::iter::once(0)).collect()
@@ -919,7 +919,15 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
 // -------------------------------------------------------- single instance ----
 
 const MUTEX_NAME: &str = "Local\\VisuraSingleInstance";
-const EVENT_NAME: &str = "Local\\VisuraShowWindow";
+
+/// One named event per request; an event carries no data, only that it fired.
+/// The name for showing the window predates the others and is kept as it was.
+fn event_name(request: Request) -> String {
+    match request {
+        Request::Show => "Local\\VisuraShowWindow".to_string(),
+        other => format!("Local\\VisuraRequest-{}", other.name()),
+    }
+}
 
 /// A handle that keeps the single instance claim alive for the whole run.
 pub struct InstanceGuard(HANDLE);
@@ -936,15 +944,15 @@ impl Drop for InstanceGuard {
     }
 }
 
-/// Returns `None` when another copy already runs; that copy is asked to show
-/// its window instead.
-pub fn acquire_single_instance() -> Option<InstanceGuard> {
+/// Returns `None` when another copy already runs; that copy is handed the
+/// request instead.
+pub fn acquire_single_instance(request: Request) -> Option<InstanceGuard> {
     unsafe {
         let name = wide(MUTEX_NAME);
         let mutex = CreateMutexW(None, true, PCWSTR(name.as_ptr())).ok()?;
         if windows::Win32::Foundation::GetLastError() == ERROR_ALREADY_EXISTS {
             let _ = CloseHandle(mutex);
-            let event_name = wide(EVENT_NAME);
+            let event_name = wide(event_name(request));
             if let Ok(event) = CreateEventW(None, false, false, PCWSTR(event_name.as_ptr())) {
                 let _ = SetEvent(event);
                 let _ = CloseHandle(event);
@@ -955,21 +963,29 @@ pub fn acquire_single_instance() -> Option<InstanceGuard> {
     }
 }
 
-/// Call `on_show` whenever another copy of the program is started and asks
-/// this one to come to the front. The guard is kept alive by the thread.
-pub fn spawn_show_listener(guard: InstanceGuard, on_show: impl Fn() + Send + 'static) {
+/// Call `on_request` whenever another copy of the program is started and
+/// hands this one a request. The guard is kept alive by the thread.
+pub fn spawn_request_listener(guard: InstanceGuard, on_request: impl Fn(Request) + Send + 'static) {
     std::thread::Builder::new()
         .name("visura-instance".into())
         .spawn(move || {
             let _guard = guard;
-            let name = wide(EVENT_NAME);
-            let Ok(event) = (unsafe { CreateEventW(None, false, false, PCWSTR(name.as_ptr())) })
-            else {
-                return;
-            };
+            let mut events = Vec::new();
+            for request in Request::ALL {
+                let name = wide(event_name(request));
+                match unsafe { CreateEventW(None, false, false, PCWSTR(name.as_ptr())) } {
+                    Ok(event) => events.push(event),
+                    Err(_) => return,
+                }
+            }
             loop {
-                unsafe { WaitForSingleObject(event, u32::MAX) };
-                on_show();
+                let fired = unsafe { WaitForMultipleObjects(&events, false, u32::MAX) };
+                let index = fired.0.wrapping_sub(WAIT_OBJECT_0.0) as usize;
+                match Request::ALL.get(index) {
+                    Some(&request) => on_request(request),
+                    // Failed or abandoned: nothing sensible left to wait for.
+                    None => return,
+                }
             }
         })
         .ok();

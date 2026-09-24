@@ -23,19 +23,43 @@ use std::sync::Mutex;
 pub static INSTANCE: Mutex<Option<platform::InstanceGuard>> = Mutex::new(None);
 
 const HELP: &str = "\
-Visura – Screenshots für Windows und Linux
+Visura - screenshots for Windows and Linux
 
-Aufruf:
-  visura [Optionen]
+Usage:
+  visura [options]
 
-Optionen:
-  --background     ohne Fenster starten, nur Tastenkürzel und Taskleiste
-  --version        Version ausgeben
-  --help           diese Hilfe
+Options:
+  --shot <region|window|screen>
+                   take a screenshot; a running Visura does it, otherwise
+                   Visura starts in the background and does it
+  --background     start without a window, shortcuts and tray only
+  --version        print the version
+  --help           this help
 
-Konfiguration:
-  VISURA_CONFIG=<Pfad>   eine andere Konfigurationsdatei verwenden
+Environment:
+  VISURA_CONFIG=<path>   use a different configuration file
 ";
+
+/// The value of `--shot`, as `--shot region` or `--shot=region`.
+fn shot_argument(args: &[String]) -> Result<Option<platform::Request>, String> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let value = if arg == "--shot" {
+            iter.next().map(String::as_str).unwrap_or("")
+        } else if let Some(value) = arg.strip_prefix("--shot=") {
+            value
+        } else {
+            continue;
+        };
+        return match platform::Request::parse(value) {
+            Some(platform::Request::Show) | None => Err(format!(
+                "--shot takes region, window or screen, not '{value}'"
+            )),
+            Some(request) => Ok(Some(request)),
+        };
+    }
+    Ok(None)
+}
 
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -48,11 +72,21 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    let shot = match shot_argument(&args) {
+        Ok(shot) => shot,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    };
+
     let (config, _) = config::Config::load();
-    let start_hidden = args.iter().any(|a| a == "--background") || config.ui.start_hidden;
+    // Asked for a shot only: the window stays out of the way.
+    let start_hidden =
+        shot.is_some() || args.iter().any(|a| a == "--background") || config.ui.start_hidden;
 
     // A second copy would fight over the hotkeys, so it hands over instead.
-    match platform::acquire_single_instance() {
+    match platform::acquire_single_instance(shot.unwrap_or(platform::Request::Show)) {
         Some(guard) => {
             if let Ok(mut slot) = INSTANCE.lock() {
                 *slot = Some(guard);
@@ -75,6 +109,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Visura",
         options,
-        Box::new(move |cc| Ok(Box::new(app::App::new(cc, start_hidden)))),
+        Box::new(move |cc| Ok(Box::new(app::App::new(cc, start_hidden, shot)))),
     )
 }

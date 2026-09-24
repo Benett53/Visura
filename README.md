@@ -17,16 +17,19 @@ on the clipboard, and the window keeps the last few within reach.
   whatever the window is doing, including minimised
 - Selection overlay on a frozen frame: the window under the cursor gets a
   moving dashed outline that travels to the next one instead of jumping
-- Panes inside a window are outlined on their own where the program has them,
-  for example the page in Chromium based browsers and Electron apps without
-  the tabs and address bar around it
+- Holding `Ctrl` outlines the pane under the cursor instead of the whole
+  window where the program has panes, for example the page in Chromium based
+  browsers and Electron apps without the tabs and address bar around it
 - File names built from the program and the date, for example
   `Firefox_2026-09-21.png`, or random characters when names should say nothing
 - Recent shots in the main window, the full library in a separate window with
   search and day headings
 - Drag a shot out of the list into another program
 - Delete moves to the recycle bin
-- Optionally, shots taken in a session go to the recycle bin when Visura quits
+- Optionally, shots taken in a session go to the recycle bin when Visura quits,
+  and shots older than a set number of days are moved there automatically
+- `visura --shot region|window|screen` for binding a key in the desktop's own
+  settings; a running Visura takes the shot
 - Dark, black and light themes, seven accents
 
 No upload, no account, no sharing, no image editor. Screenshots go into a
@@ -61,8 +64,8 @@ In the overlay:
 | Action | How |
 |---|---|
 | Free region | Drag |
-| A window or pane | Move the mouse over it and click the outline |
-| The whole window around a pane | Hold `Ctrl` and click |
+| A window | Move the mouse over it and click the outline |
+| A pane inside a window | Hold `Ctrl` and click |
 | Everything | `Space` |
 | Take the current outline | `Enter` |
 | Cancel | `Esc` or right-click |
@@ -122,6 +125,7 @@ filename = "%app_%Y-%m-%d"
 anonymous_names = false
 format = "png"
 jpeg_quality = 90
+keep_days = 0
 autostart = false
 
 [after]
@@ -140,7 +144,7 @@ dim = 0.55
 magnifier = false
 crosshair = true
 detect_windows = true
-detect_areas = true
+panes_first = false
 show_hints = false
 hide_self = false
 
@@ -153,6 +157,9 @@ start_hidden = false
 close_to_tray = false
 confirm_delete = true
 ```
+
+`keep_days = 0` keeps shots forever. `panes_first = true` makes a plain click
+take the pane and `Ctrl` the whole window.
 
 An empty shortcut means the action has none. A shortcut that cannot be read
 falls back to its default instead of stopping the program.
@@ -180,16 +187,19 @@ window, which is what the overlay is built on.
 Under Wayland neither is allowed. XWayland answers the connection but reading
 the root window fails, so the capture falls back to the screenshot helper the
 desktop ships — `grim`, `wayshot`, `spectacle` or `gnome-screenshot`, whichever
-is installed. That yields the same frozen frame, but there is no window
-geometry, so windows are not outlined and a click selects nothing.
+is installed. That yields the same frozen frame. Window positions come from the
+compositor where it tells them: Hyprland (`hyprctl`) and Sway (`swaymsg`).
+Elsewhere, for example on GNOME and KDE, windows are not outlined and a click
+selects nothing.
 
-Two more differences:
+Global shortcuts do not work on Wayland. Bind `visura --shot region` to a key in
+the desktop's keyboard settings instead.
 
-- No tray icon. It would mean a GTK and libayatana-appindicator dependency for
-  one icon, so closing the window quits instead.
-- Dragging out of the list puts the file path on the clipboard rather than
-  starting a real drag. XDND from a winit window needs a pointer grab that
-  winit does not hand out.
+No tray icon on Linux. It would mean a GTK and libayatana-appindicator
+dependency for one icon, so closing the window quits instead.
+
+Dragging out of the list uses XDND, so it needs X11 or XWayland. Where no drag
+can start, the file path goes to the clipboard instead.
 
 Window outlining uses `_NET_CLIENT_LIST_STACKING`, so it needs a window manager
 that sets it. Almost all do.

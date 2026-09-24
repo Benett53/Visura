@@ -109,6 +109,23 @@ pub fn day_label(day: LocalTime, today: LocalTime) -> String {
     }
 }
 
+/// The shots whose file is older than `days` days at `now`. Nothing when
+/// `days` is 0, which means keep everything.
+pub fn older_than(shots: &[Shot], now: SystemTime, days: u32) -> Vec<PathBuf> {
+    if days == 0 {
+        return Vec::new();
+    }
+    let age = std::time::Duration::from_secs(u64::from(days) * 24 * 60 * 60);
+    let Some(cutoff) = now.checked_sub(age) else {
+        return Vec::new();
+    };
+    shots
+        .iter()
+        .filter(|shot| shot.modified < cutoff)
+        .map(|shot| shot.path.clone())
+        .collect()
+}
+
 /// Delete through the recycle bin or trash, never by unlinking.
 pub fn delete(paths: &[PathBuf]) -> Result<(), String> {
     platform::move_to_trash(paths)
@@ -191,6 +208,21 @@ mod tests {
             time(2028, 3, 1).day_number() - time(2028, 2, 28).day_number(),
             2
         );
+    }
+
+    #[test]
+    fn only_shots_past_the_limit_expire() {
+        let now = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(100 * 86_400);
+        let shot = |name: &str, days_old: u64| Shot {
+            path: PathBuf::from(name),
+            name: name.to_string(),
+            modified: now - std::time::Duration::from_secs(days_old * 86_400),
+            taken: time(2026, 1, 1),
+            bytes: 1,
+        };
+        let shots = [shot("new", 1), shot("edge", 30), shot("old", 31)];
+        assert_eq!(older_than(&shots, now, 30), vec![PathBuf::from("old")]);
+        assert!(older_than(&shots, now, 0).is_empty());
     }
 
     #[test]

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.1.3
+
+Changed:
+
+- A click in the overlay takes the whole window again; holding `Ctrl` takes
+  the pane under the cursor. In programs covered by panes edge to edge, such
+  as Explorer, the whole window was out of reach. `panes_first` restores the
+  0.1.2 behaviour; `detect_areas` is no longer read.
+
+Added:
+
+- `--shot region|window|screen` on the command line. A running Visura takes
+  the shot; otherwise Visura starts in the background and takes it.
+- Shots older than a set number of days can be moved to the recycle bin
+  automatically (`keep_days`, off by default).
+- Linux: dragging shots out of the list into other programs over XDND.
+- Linux: window outlines on Wayland under Hyprland and Sway.
+
+Fixed:
+
+- `--help` printed German text.
+
 ## 0.1.2
 
 Fixed:
