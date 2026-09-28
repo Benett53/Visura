@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1
+
+Fixed:
+
+- Windows: taking a screenshot could turn the screen black for a moment on
+  some NVIDIA setups. The selection overlay covered the monitor exactly, which
+  the driver took for a full screen game and switched the display mode for. It
+  is now one pixel wider than the desktop.
+
 ## 0.3.0
 
 Fixed:

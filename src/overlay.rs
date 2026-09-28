@@ -242,7 +242,7 @@ impl Overlay {
             self.view = Some(view);
             self.stable_frames = 0;
         }
-        if view == self.screen {
+        if view.intersect(&self.screen) == self.screen {
             self.unsettled_frames = 0;
         } else {
             self.unsettled_frames = self.unsettled_frames.saturating_add(1);

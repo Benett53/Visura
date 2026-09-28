@@ -159,6 +159,9 @@ pub fn ctrl_key_down() -> bool {
     pointer_mask() & CONTROL != 0
 }
 
+/// Only Windows needs the overlay oversized; see the Windows version.
+pub const OVERLAY_OVERSCAN: i32 = 0;
+
 /// Only Windows needs telling; see the Windows version.
 pub fn set_overlay_active(_active: bool) {}
 

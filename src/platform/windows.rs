@@ -509,6 +509,10 @@ pub fn set_main_window(hwnd: isize) {
 static OVERLAY_ACTIVE: AtomicBool = AtomicBool::new(false);
 const OVERLAY_SUBCLASS_ID: usize = 0x5649_5355;
 
+/// How much wider than the desktop the overlay window is made; see
+/// `App::cover_screen`.
+pub const OVERLAY_OVERSCAN: i32 = 1;
+
 /// Only a Linux question; Windows has one desktop protocol.
 pub fn is_wayland() -> bool {
     false

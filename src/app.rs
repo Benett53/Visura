@@ -779,8 +779,14 @@ impl App {
             screen.x as f32 / points,
             screen.y as f32 / points,
         )));
+        // One pixel wider than the desktop on Windows. A window that covers
+        // a monitor exactly is taken for a full screen game by the graphics
+        // driver, which may then switch the display mode (G-SYNC, direct
+        // scan-out) and leave the screen black for a second or two. The extra
+        // column lies beyond the desktop, where nothing is shown.
+        let extra = platform::OVERLAY_OVERSCAN as f32;
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-            screen.w as f32 / points,
+            (screen.w as f32 + extra) / points,
             screen.h as f32 / points,
         )));
     }
