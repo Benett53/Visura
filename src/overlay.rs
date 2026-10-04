@@ -174,10 +174,8 @@ impl Overlay {
 
         let image = &self.image;
         let texture = self.texture.get_or_insert_with(|| {
-            let color = egui::ColorImage::from_rgba_unmultiplied(
-                [image.width as usize, image.height as usize],
-                &image.rgba,
-            );
+            let color =
+                crate::ui::canvas::texture_pixels(&ctx, image.width, image.height, &image.rgba);
             // Nearest keeps the magnifier showing real pixels rather than a
             // blurred average, and the full screen draw is 1:1 anyway.
             ctx.load_texture("visura-frozen-screen", color, egui::TextureOptions::NEAREST)

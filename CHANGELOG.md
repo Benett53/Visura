@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.2
+
+Changed:
+
+- New logo, also shown in the sidebar. Icons are scaled with a sharper filter
+  and the small sizes are drawn larger.
+
+Fixed:
+
+- The configuration file is written to a temporary file and then moved into
+  place, so a crash or a full disk can no longer leave it empty. A file that
+  cannot be read is kept as `config.toml.broken` instead of being replaced by
+  the defaults on the next save.
+- Images and desktops larger than the graphics driver's texture limit are
+  shown scaled down instead of failing. Cropping and saving still use every
+  pixel.
+- Linux: without `XDG_RUNTIME_DIR` the single instance socket was shared by
+  all users of the machine. It now carries the user id and only its owner can
+  use it.
+- Linux: autostart failed when the program path contained spaces.
+
 ## 0.3.1
 
 Fixed:

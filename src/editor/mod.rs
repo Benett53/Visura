@@ -299,7 +299,7 @@ impl Editor {
         let (w, h) = (decoded.width(), decoded.height());
         let texture = ctx.load_texture(
             format!("visura-edit-{}", path.display()),
-            egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], decoded.as_raw()),
+            crate::ui::canvas::texture_pixels(ctx, w, h, decoded.as_raw()),
             TextureOptions {
                 magnification: egui::TextureFilter::Nearest,
                 minification: egui::TextureFilter::Linear,

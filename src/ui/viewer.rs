@@ -34,7 +34,8 @@ pub fn load_texture(ctx: &egui::Context, path: &Path) -> Result<Loaded, String> 
         .map_err(|e| format!("{} could not be read: {e}", path.display()))?
         .to_rgba8();
     let size = [decoded.width() as usize, decoded.height() as usize];
-    let pixels = egui::ColorImage::from_rgba_unmultiplied(size, decoded.as_raw());
+    let pixels =
+        super::canvas::texture_pixels(ctx, decoded.width(), decoded.height(), decoded.as_raw());
     let texture = ctx.load_texture(
         format!("visura-view-{}", path.display()),
         pixels,

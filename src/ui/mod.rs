@@ -223,7 +223,13 @@ fn sidebar(app: &mut App, ui: &mut egui::Ui) {
         .resizable(false)
         .show(ui, |ui| {
             ui.add_space(10.0);
-            ui.label(RichText::new("Visura").size(15.0).strong());
+            ui.horizontal(|ui| {
+                ui.add_space(2.0);
+                if let Some(logo) = crate::icon::texture(ui.ctx()) {
+                    ui.add(egui::Image::new((logo.id(), vec2(20.0, 20.0))));
+                }
+                ui.label(RichText::new("Visura").size(15.0).strong());
+            });
             ui.add_space(12.0);
 
             for (label, mode) in [

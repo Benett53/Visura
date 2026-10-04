@@ -114,6 +114,33 @@ fn fit_scale(area: Rect, size: Vec2, ppp: f32) -> f32 {
     fit.min(1.0 / ppp.max(0.1)).max(MIN_SCALE)
 }
 
+/// Pixels for a texture, shrunk where the image is larger than the graphics
+/// driver accepts (usually 16384 pixels a side, sometimes 8192). Only what is
+/// shown is reduced; cropping and saving keep working on the full image.
+pub fn texture_pixels(
+    ctx: &egui::Context,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> egui::ColorImage {
+    let limit = ctx.input(|i| i.max_texture_side).max(1024) as u32;
+    if width <= limit && height <= limit {
+        return egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], rgba);
+    }
+    let scale = limit as f64 / width.max(height) as f64;
+    let (w, h) = (
+        ((width as f64 * scale) as u32).max(1),
+        ((height as f64 * scale) as u32).max(1),
+    );
+    match image::RgbaImage::from_raw(width, height, rgba.to_vec()) {
+        Some(full) => {
+            let small = image::imageops::resize(&full, w, h, image::imageops::FilterType::Triangle);
+            egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], small.as_raw())
+        }
+        None => egui::ColorImage::new([1, 1], vec![egui::Color32::BLACK]),
+    }
+}
+
 /// A checkerboard behind transparent images, drawn only where the image is.
 pub fn checkerboard(painter: &egui::Painter, rect: Rect, dark: bool) {
     let (a, b) = if dark {
@@ -179,6 +206,17 @@ mod tests {
         // And back to screen gives the anchor again.
         let back = view.screen_pos(area(), size, 1.0, after);
         assert!((back - anchor).length() < 1e-3);
+    }
+
+    #[test]
+    fn oversized_images_are_shrunk_for_display_only() {
+        let ctx = egui::Context::default();
+        let limit = ctx.input(|i| i.max_texture_side).max(1024);
+        let (w, h) = (limit as u32 * 2 + 10, 20);
+        let pixels = texture_pixels(&ctx, w, h, &vec![200u8; (w * h * 4) as usize]);
+        assert!(pixels.size[0] <= limit && pixels.size[0] > 0);
+        let small = texture_pixels(&ctx, 10, 10, &[1u8; 400]);
+        assert_eq!(small.size, [10, 10]);
     }
 
     #[test]

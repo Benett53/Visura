@@ -887,18 +887,47 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let entry = format!(
         "[Desktop Entry]\nType=Application\nName=Visura\nExec={} --background\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
-        exe.display()
+        desktop_exec_quote(&exe.to_string_lossy())
     );
     std::fs::write(&file, entry).map_err(|e| e.to_string())
 }
 
+/// Quote a program path for the `Exec` key of a desktop entry, so a path with
+/// spaces still starts the program.
+fn desktop_exec_quote(path: &str) -> String {
+    let mut quoted = String::from("\"");
+    for c in path.chars() {
+        if matches!(c, '"' | '`' | '$' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(c);
+    }
+    quoted.push('"');
+    // A literal percent sign must be doubled in the Exec key.
+    quoted.replace('%', "%%")
+}
+
 // -------------------------------------------------------- single instance ----
 
+/// The per-user runtime directory, or the temporary directory with the user
+/// id in the name. A bare `/tmp/visura.sock` would be shared by every user of
+/// the machine: one could take shots in another's session, or keep the other
+/// from starting at all.
 fn socket_path() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("visura.sock")
+    match std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
+        Some(dir) => PathBuf::from(dir).join("visura.sock"),
+        None => {
+            // SAFETY: getuid cannot fail and has no preconditions.
+            let uid = unsafe { libc::getuid() };
+            std::env::temp_dir().join(format!("visura-{uid}.sock"))
+        }
+    }
+}
+
+/// Only the owner may talk to the socket.
+fn restrict_socket(path: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
 }
 
 pub struct InstanceGuard(UnixListener);
@@ -914,7 +943,10 @@ impl Drop for InstanceGuard {
 pub fn acquire_single_instance(request: Request) -> Option<InstanceGuard> {
     let path = socket_path();
     match UnixListener::bind(&path) {
-        Ok(listener) => Some(InstanceGuard(listener)),
+        Ok(listener) => {
+            restrict_socket(&path);
+            Some(InstanceGuard(listener))
+        }
         Err(_) => {
             // Either a live instance or a socket left behind by a crash.
             match UnixStream::connect(&path) {
@@ -924,7 +956,9 @@ pub fn acquire_single_instance(request: Request) -> Option<InstanceGuard> {
                 }
                 Err(_) => {
                     let _ = std::fs::remove_file(&path);
-                    UnixListener::bind(&path).ok().map(InstanceGuard)
+                    let listener = UnixListener::bind(&path).ok()?;
+                    restrict_socket(&path);
+                    Some(InstanceGuard(listener))
                 }
             }
         }
@@ -951,4 +985,18 @@ pub fn spawn_request_listener(guard: InstanceGuard, on_request: impl Fn(Request)
             }
         })
         .ok();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_entries_quote_awkward_paths() {
+        assert_eq!(desktop_exec_quote("/opt/visura"), "\"/opt/visura\"");
+        assert_eq!(
+            desktop_exec_quote("/home/a b/50% \"x\"/visura"),
+            "\"/home/a b/50%% \\\"x\\\"/visura\""
+        );
+    }
 }

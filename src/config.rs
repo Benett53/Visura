@@ -272,6 +272,26 @@ impl Default for ToolStyle {
     }
 }
 
+/// Replace `path` with `bytes` without ever leaving a half written file.
+pub fn write_replacing(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write as _;
+    let temp = path.with_extension(format!("tmp-{}", std::process::id()));
+    let written = (|| {
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&temp);
+        return Err(format!("{} could not be written: {e}", path.display()));
+    }
+    // A rename onto an existing file replaces it on both platforms.
+    std::fs::rename(&temp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&temp);
+        format!("{} could not be replaced: {e}", path.display())
+    })
+}
+
 fn to_hex(c: egui::Color32) -> String {
     let [r, g, b, a] = c.to_srgba_unmultiplied();
     if a == 255 {
@@ -384,20 +404,36 @@ impl Config {
         };
         match toml::from_str::<Config>(&text) {
             Ok(config) => (config.sanitised(), None),
-            Err(e) => (
-                Self::default(),
-                Some(format!("{} could not be read: {e}", path.display())),
-            ),
+            Err(e) => {
+                // The defaults take over, and the next save would replace the
+                // file. A copy keeps whatever was in it for the user to
+                // repair by hand.
+                let backup = path.with_extension("toml.broken");
+                let kept = std::fs::copy(&path, &backup).is_ok();
+                let note = if kept {
+                    format!(
+                        "{} could not be read: {e}\nDefaults are used; the old file was kept as {}",
+                        path.display(),
+                        backup.display()
+                    )
+                } else {
+                    format!("{} could not be read: {e}", path.display())
+                };
+                (Self::default(), Some(note))
+            }
         }
     }
 
+    /// Write the file in one piece: to a temporary file next to it first,
+    /// then moved over the old one. A crash or a full disk halfway through
+    /// leaves the previous settings intact instead of an empty file.
     pub fn save(&self) -> Result<(), String> {
         let path = Self::path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let text = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(&path, text).map_err(|e| e.to_string())
+        write_replacing(&path, text.as_bytes())
     }
 
     /// Clamp values that would otherwise produce a broken window or unreadable
@@ -486,5 +522,18 @@ mod tests {
         assert_eq!(faint.a(), 0x80);
         assert_eq!(from_hex(&to_hex(faint)), Some(faint));
         assert_eq!(from_hex("#nope"), None);
+    }
+
+    #[test]
+    fn replacing_a_file_leaves_no_temporary_behind() {
+        let dir = std::env::temp_dir().join(format!("visura-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("config.toml");
+        write_replacing(&file, b"one").unwrap();
+        write_replacing(&file, b"two").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "two");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
