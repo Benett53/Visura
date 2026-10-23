@@ -169,11 +169,22 @@ impl App {
             ui.add_space(10.0);
             labelled(ui, "Format", |ui| {
                 ui.horizontal(|ui| {
-                    for format in [Format::Png, Format::Jpeg] {
+                    for format in Format::ALL {
                         ui.selectable_value(&mut self.draft.format, format, format.label());
                     }
                 });
             });
+            if self.draft.format == Format::Jxl {
+                ui.label(
+                    RichText::new(
+                        "    Not every program opens JPEG XL yet. Windows needs the JPEG XL \
+                         Image Extension from the Microsoft Store, and some chat apps and \
+                         websites do not take it. Copying to the clipboard always works.",
+                    )
+                    .color(palette.muted)
+                    .size(11.5),
+                );
+            }
             if self.draft.format == Format::Jpeg {
                 labelled(ui, "Quality", |ui| {
                     ui.add(egui::Slider::new(&mut self.draft.jpeg_quality, 40..=100).suffix(" %"));

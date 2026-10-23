@@ -377,8 +377,8 @@ impl App {
             .then(|| self.shots[target as usize].path.clone())
     }
 
-    pub fn copy_image_of(&mut self, path: &PathBuf) {
-        match image::open(path) {
+    pub fn copy_image_of(&mut self, path: &std::path::Path) {
+        match crate::codec::open(path) {
             Ok(decoded) => {
                 let rgba = decoded.to_rgba8();
                 let image = platform::Image {

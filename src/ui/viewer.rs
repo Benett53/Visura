@@ -30,9 +30,7 @@ pub struct Loaded {
 
 /// Decode a file into a texture that stays sharp when zoomed in.
 pub fn load_texture(ctx: &egui::Context, path: &Path) -> Result<Loaded, String> {
-    let decoded = image::open(path)
-        .map_err(|e| format!("{} could not be read: {e}", path.display()))?
-        .to_rgba8();
+    let decoded = crate::codec::open(path)?.to_rgba8();
     let size = [decoded.width() as usize, decoded.height() as usize];
     let pixels =
         super::canvas::texture_pixels(ctx, decoded.width(), decoded.height(), decoded.as_raw());

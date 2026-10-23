@@ -5,6 +5,7 @@
 mod app;
 mod capture;
 mod clipboard;
+mod codec;
 mod config;
 mod editor;
 mod hotkeys;

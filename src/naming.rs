@@ -104,7 +104,19 @@ pub fn sanitise(text: &str) -> String {
         }
     }
     // Trailing dots and spaces are legal to create but a nuisance on Windows.
-    out.trim().trim_end_matches('.').trim().to_string()
+    let out = out.trim().trim_end_matches('.').trim().to_string();
+    // Windows refuses these names whatever the extension: a program called
+    // "con" would otherwise make every capture of it fail.
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    let base = out.split('.').next().unwrap_or("").trim_end();
+    if RESERVED.iter().any(|r| r.eq_ignore_ascii_case(base)) {
+        format!("{out}_")
+    } else {
+        out
+    }
 }
 
 /// Tidy up the separators an empty token leaves behind.
@@ -212,6 +224,14 @@ pub fn target_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reserved_windows_names_are_avoided() {
+        assert_eq!(sanitise("con"), "con_");
+        assert_eq!(sanitise("NUL.txt"), "NUL.txt_");
+        assert_eq!(sanitise("Com1"), "Com1_");
+        assert_eq!(sanitise("console"), "console");
+    }
 
     fn ctx() -> Context<'static> {
         Context {

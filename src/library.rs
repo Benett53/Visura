@@ -14,7 +14,7 @@ use crate::platform::{self, LocalTime};
 const MAX_ENTRIES: usize = 20_000;
 const MAX_DEPTH: usize = 6;
 
-pub const EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
+pub const EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "webp", "jxl"];
 
 #[derive(Clone, Debug)]
 pub struct Shot {
@@ -126,6 +126,30 @@ pub fn older_than(shots: &[Shot], now: SystemTime, days: u32) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Replace `path` with `bytes` without ever leaving a half written file.
+///
+/// Used for everything Visura writes over: the configuration and edited
+/// screenshots. A crash or a full disk halfway through then leaves the old
+/// file as it was rather than a broken one.
+pub fn write_replacing(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write as _;
+    let temp = path.with_extension(format!("tmp-{}", std::process::id()));
+    let written = (|| {
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&temp);
+        return Err(format!("{} could not be written: {e}", path.display()));
+    }
+    // A rename onto an existing file replaces it on both platforms.
+    std::fs::rename(&temp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&temp);
+        format!("{} could not be replaced: {e}", path.display())
+    })
+}
+
 /// Delete through the recycle bin or trash, never by unlinking.
 pub fn delete(paths: &[PathBuf]) -> Result<(), String> {
     platform::move_to_trash(paths)
@@ -223,6 +247,19 @@ mod tests {
         let shots = [shot("new", 1), shot("edge", 30), shot("old", 31)];
         assert_eq!(older_than(&shots, now, 30), vec![PathBuf::from("old")]);
         assert!(older_than(&shots, now, 0).is_empty());
+    }
+
+    #[test]
+    fn replacing_a_file_leaves_no_temporary_behind() {
+        let dir = std::env::temp_dir().join(format!("visura-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("config.toml");
+        write_replacing(&file, b"one").unwrap();
+        write_replacing(&file, b"two").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "two");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -404,6 +404,16 @@ impl Manager {
                 continue;
             }
             match parse(shortcut) {
+                // Two actions on one shortcut: the second would fail to
+                // register and be reported as taken by another program.
+                Ok(hotkey) if bound.contains_key(&hotkey.id()) => {
+                    let first = bound[&hotkey.id()];
+                    self.problems.push(format!(
+                        "{} ({shortcut}) is already used for {}",
+                        action.label(),
+                        first.label()
+                    ));
+                }
                 Ok(hotkey) => match manager.register(hotkey) {
                     Ok(()) => {
                         bound.insert(hotkey.id(), action);

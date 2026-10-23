@@ -181,7 +181,7 @@ fn build(path: &Path, key: u64) -> Option<egui::ColorImage> {
         return Some(image);
     }
 
-    let source = image::open(path).ok()?;
+    let source = crate::codec::open(path).ok()?;
     let thumb = source.thumbnail(THUMB_EDGE, THUMB_EDGE).to_rgb8();
 
     // Best effort: a cache that cannot be written is not worth an error.

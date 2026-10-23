@@ -16,13 +16,18 @@ use crate::platform;
 pub enum Format {
     Png,
     Jpeg,
+    /// JPEG XL, written lossless.
+    Jxl,
 }
 
 impl Format {
+    pub const ALL: [Format; 3] = [Format::Png, Format::Jpeg, Format::Jxl];
+
     pub fn extension(self) -> &'static str {
         match self {
             Format::Png => "png",
             Format::Jpeg => "jpg",
+            Format::Jxl => "jxl",
         }
     }
 
@@ -30,6 +35,17 @@ impl Format {
         match self {
             Format::Png => "PNG (lossless)",
             Format::Jpeg => "JPEG (smaller)",
+            Format::Jxl => "JPEG XL (lossless, smaller)",
+        }
+    }
+
+    /// The format a file name asks for, where Visura can write it.
+    pub fn from_extension(extension: &str) -> Option<Format> {
+        match extension.to_ascii_lowercase().as_str() {
+            "png" => Some(Format::Png),
+            "jpg" | "jpeg" => Some(Format::Jpeg),
+            "jxl" => Some(Format::Jxl),
+            _ => None,
         }
     }
 }
@@ -272,26 +288,6 @@ impl Default for ToolStyle {
     }
 }
 
-/// Replace `path` with `bytes` without ever leaving a half written file.
-pub fn write_replacing(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
-    use std::io::Write as _;
-    let temp = path.with_extension(format!("tmp-{}", std::process::id()));
-    let written = (|| {
-        let mut file = std::fs::File::create(&temp)?;
-        file.write_all(bytes)?;
-        file.sync_all()
-    })();
-    if let Err(e) = written {
-        let _ = std::fs::remove_file(&temp);
-        return Err(format!("{} could not be written: {e}", path.display()));
-    }
-    // A rename onto an existing file replaces it on both platforms.
-    std::fs::rename(&temp, path).map_err(|e| {
-        let _ = std::fs::remove_file(&temp);
-        format!("{} could not be replaced: {e}", path.display())
-    })
-}
-
 fn to_hex(c: egui::Color32) -> String {
     let [r, g, b, a] = c.to_srgba_unmultiplied();
     if a == 255 {
@@ -433,7 +429,7 @@ impl Config {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         let text = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
-        write_replacing(&path, text.as_bytes())
+        crate::library::write_replacing(&path, text.as_bytes())
     }
 
     /// Clamp values that would otherwise produce a broken window or unreadable
@@ -522,18 +518,5 @@ mod tests {
         assert_eq!(faint.a(), 0x80);
         assert_eq!(from_hex(&to_hex(faint)), Some(faint));
         assert_eq!(from_hex("#nope"), None);
-    }
-
-    #[test]
-    fn replacing_a_file_leaves_no_temporary_behind() {
-        let dir = std::env::temp_dir().join(format!("visura-write-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("config.toml");
-        write_replacing(&file, b"one").unwrap();
-        write_replacing(&file, b"two").unwrap();
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "two");
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

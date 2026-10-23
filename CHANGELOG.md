@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0
+
+Added:
+
+- JPEG XL as a format for saving, written lossless. On a full screen shot it
+  is about a third smaller than PNG. The library, the viewer and the editor
+  read JPEG XL as well, and the editor can save edits in it.
+
+Fixed:
+
+- WebP files were listed in the library but could not be shown or opened.
+- Saving in the editor wrote straight over the original file; a crash or a
+  full disk at that moment could leave the screenshot broken. Edits and new
+  shots are now written to a temporary file first and then moved into place.
+- A program or file name such as "con" or "nul", which Windows reserves, made
+  saving fail. Such names now get an underscore.
+- The same shortcut set for two actions was reported as taken by another
+  program. The message now says which action already uses it.
+
 ## 0.3.2
 
 Changed:

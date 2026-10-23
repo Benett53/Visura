@@ -71,7 +71,7 @@ pub fn store(
     }
 
     let encoded = encode(image, config.format, config.jpeg_quality)?;
-    std::fs::write(&path, encoded)
+    crate::library::write_replacing(&path, &encoded)
         .map_err(|e| format!("{} could not be written: {e}", path.display()))?;
 
     // Follow-up actions must never lose the file that is already saved, so a
@@ -100,6 +100,9 @@ pub fn store(
 }
 
 pub fn encode(image: &Image, format: Format, jpeg_quality: u8) -> Result<Vec<u8>, String> {
+    if format == Format::Jxl {
+        return encode_jxl(image);
+    }
     let mut out = Vec::new();
     let mut cursor = std::io::Cursor::new(&mut out);
     match format {
@@ -121,6 +124,7 @@ pub fn encode(image: &Image, format: Format, jpeg_quality: u8) -> Result<Vec<u8>
             )
             .map_err(|e| format!("PNG: {e}"))?;
         }
+        Format::Jxl => unreachable!("handled above"),
         Format::Jpeg => {
             // JPEG has no alpha channel, so the buffer is narrowed first.
             let mut rgb = Vec::with_capacity((image.width * image.height * 3) as usize);
@@ -142,6 +146,42 @@ pub fn encode(image: &Image, format: Format, jpeg_quality: u8) -> Result<Vec<u8>
     Ok(out)
 }
 
+/// JPEG XL, lossless. Screenshots are mostly flat areas and sharp text,
+/// where lossless JPEG XL is smaller than PNG without JPEG's smearing.
+fn encode_jxl(image: &Image) -> Result<Vec<u8>, String> {
+    use zune_core::bit_depth::BitDepth;
+    use zune_core::colorspace::ColorSpace;
+    use zune_core::options::EncoderOptions;
+
+    if image.width < 2 || image.height < 2 {
+        return Err("JPEG XL needs an image of at least 2 × 2 pixels".into());
+    }
+    // An opaque shot, which is nearly every shot, is written without the
+    // alpha channel: a quarter less to compress.
+    let opaque = image.rgba.chunks_exact(4).all(|p| p[3] == 255);
+    let rgb;
+    let (pixels, colorspace) = if opaque {
+        rgb = image
+            .rgba
+            .chunks_exact(4)
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect::<Vec<u8>>();
+        (rgb.as_slice(), ColorSpace::RGB)
+    } else {
+        (image.rgba.as_slice(), ColorSpace::RGBA)
+    };
+    let options = EncoderOptions::default()
+        .set_width(image.width as usize)
+        .set_height(image.height as usize)
+        .set_colorspace(colorspace)
+        .set_depth(BitDepth::Eight);
+    let mut out = Vec::new();
+    zune_jpegxl::JxlSimpleEncoder::new(pixels, options)
+        .encode(&mut out)
+        .map_err(|e| format!("JPEG XL: {e:?}"))?;
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,6 +194,31 @@ mod tests {
                 .flat_map(|i| [(i % 255) as u8, 40, 90, 255])
                 .collect(),
         }
+    }
+
+    #[test]
+    fn jxl_output_is_lossless() {
+        let image = square(37, 21);
+        let bytes = encode(&image, Format::Jxl, 90).unwrap();
+        assert!(crate::codec::is_jxl(&bytes));
+        let back = crate::codec::decode(&bytes).unwrap().to_rgba8();
+        assert_eq!((back.width(), back.height()), (37, 21));
+        assert_eq!(back.as_raw(), &image.rgba);
+    }
+
+    #[test]
+    fn jxl_keeps_transparency() {
+        let mut image = square(8, 8);
+        image.rgba[3] = 0;
+        image.rgba[7] = 128;
+        let bytes = encode(&image, Format::Jxl, 90).unwrap();
+        let back = crate::codec::decode(&bytes).unwrap().to_rgba8();
+        assert_eq!(back.as_raw(), &image.rgba);
+    }
+
+    #[test]
+    fn jxl_refuses_a_single_pixel_line_instead_of_panicking() {
+        assert!(encode(&square(5, 1), Format::Jxl, 90).is_err());
     }
 
     #[test]
@@ -231,5 +296,41 @@ mod tests {
         let image = square(4, 4);
         let cropped = image.crop(Rect::new(3, 3, 10, 10));
         assert_eq!((cropped.width, cropped.height), (1, 1));
+    }
+}
+
+#[cfg(test)]
+mod size_comparison {
+    use super::*;
+
+    /// Run with `cargo test --release -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn compare_formats_on_real_screenshots() {
+        for name in [
+            "docs/main.png",
+            "docs/history.png",
+            "docs/editor.png",
+            "docs/settings.png",
+        ] {
+            let decoded = image::open(name).unwrap().to_rgba8();
+            let image = Image {
+                width: decoded.width(),
+                height: decoded.height(),
+                rgba: decoded.into_raw(),
+            };
+            for format in [Format::Png, Format::Jxl, Format::Jpeg] {
+                let start = std::time::Instant::now();
+                let bytes = encode(&image, format, 90).unwrap();
+                println!(
+                    "{name} {}x{} {:?}: {} KB in {} ms",
+                    image.width,
+                    image.height,
+                    format,
+                    bytes.len() / 1024,
+                    start.elapsed().as_millis()
+                );
+            }
+        }
     }
 }

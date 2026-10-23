@@ -27,6 +27,7 @@ on the clipboard, and the window keeps the last few within reach.
 - Drag a shot out of the list into another program
 - A built-in viewer with zoom, and an editor for arrows, shapes, text, step
   numbers, highlighting, spotlight, blur, pixelation, black boxes and cropping
+- Saves as PNG, JPEG or JPEG XL (lossless); reads PNG, JPEG, WebP and JPEG XL
 - Delete moves to the recycle bin
 - Optionally, shots taken in a session go to the recycle bin when Visura quits,
   and shots older than a set number of days are moved there automatically
@@ -176,7 +177,7 @@ folder = "C:\\Users\\you\\Pictures\\Visura"
 subfolder = "%Y-%m"
 filename = "%app_%Y-%m-%d"
 anonymous_names = false
-format = "png"
+format = "png"            # "png", "jpeg" or "jxl"
 jpeg_quality = 90
 keep_days = 0
 autostart = false
@@ -216,6 +217,12 @@ settings; it is not shown here.
 
 `keep_days = 0` keeps shots forever. `panes_first = true` makes a plain click
 take the pane and `Ctrl` the whole window.
+
+JPEG XL is written lossless. On a typical full screen shot it is about a third
+smaller than PNG and just as sharp. Not every program opens it yet: Windows
+needs the JPEG XL Image Extension from the Microsoft Store, and some chat apps
+and websites do not accept it. Copying an image to the clipboard works the same
+whatever the format.
 
 An empty shortcut means the action has none. A shortcut that cannot be read
 falls back to its default instead of stopping the program.

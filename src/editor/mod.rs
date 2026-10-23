@@ -253,10 +253,7 @@ pub fn copy_path(path: &Path) -> PathBuf {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "shot".into());
-    let ext = match writable_format(path) {
-        Some(Format::Jpeg) => "jpg",
-        _ => "png",
-    };
+    let ext = writable_format(path).unwrap_or(Format::Png).extension();
     let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
     let mut n = 1;
     loop {
@@ -274,16 +271,9 @@ pub fn copy_path(path: &Path) -> PathBuf {
 }
 
 fn writable_format(path: &Path) -> Option<Format> {
-    match path
-        .extension()
+    path.extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("png") => Some(Format::Png),
-        Some("jpg" | "jpeg") => Some(Format::Jpeg),
-        _ => None,
-    }
+        .and_then(Format::from_extension)
 }
 
 impl Editor {
@@ -293,9 +283,7 @@ impl Editor {
         settings: Settings,
         jpeg_quality: u8,
     ) -> Result<Self, String> {
-        let decoded = image::open(&path)
-            .map_err(|e| format!("{} could not be read: {e}", path.display()))?
-            .to_rgba8();
+        let decoded = crate::codec::open(&path)?.to_rgba8();
         let (w, h) = (decoded.width(), decoded.height());
         let texture = ctx.load_texture(
             format!("visura-edit-{}", path.display()),
@@ -543,7 +531,7 @@ impl Editor {
         let format = writable_format(&target).unwrap_or(Format::Png);
         let image = self.render();
         let written = crate::capture::encode(&image, format, self.jpeg_quality).and_then(|bytes| {
-            std::fs::write(&target, bytes)
+            crate::library::write_replacing(&target, &bytes)
                 .map_err(|e| format!("{} could not be written: {e}", target.display()))
         });
         match written {
