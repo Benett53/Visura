@@ -45,7 +45,7 @@ The full library, with search and day headings, opens in a window of its own:
 
 ## Install
 
-**Windows** — download `VisuraSetup.exe` from the
+**Windows:** download `VisuraSetup.exe` from the
 [latest release](../../releases/latest) and run it. It installs per user, needs
 no administrator rights, and appears in Installed apps for removal. A newer
 release installs over the old one and keeps the settings.
@@ -54,7 +54,7 @@ release installs over the old one and keeps the settings.
 
 Neither is code signed, so SmartScreen warns once: "More info" → "Run anyway".
 
-**Linux** — build from source, see below. There is no package yet.
+**Linux:** build from source, see below. There is no package yet.
 
 ## Using it
 
