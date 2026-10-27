@@ -133,7 +133,9 @@ impl Overlay {
     /// anyway, the request is repeated a few times; after that the overlay
     /// simply works with what it got.
     pub fn wants_geometry(&self) -> bool {
-        self.unsettled_frames > 0 && self.unsettled_frames % 15 == 0 && self.unsettled_frames <= 60
+        self.unsettled_frames > 0
+            && self.unsettled_frames.is_multiple_of(15)
+            && self.unsettled_frames <= 60
     }
 
     /// Pixels of the frozen frame per desktop unit, across and down.

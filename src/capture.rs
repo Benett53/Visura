@@ -128,7 +128,7 @@ pub fn encode(image: &Image, format: Format, jpeg_quality: u8) -> Result<Vec<u8>
         Format::Jpeg => {
             // JPEG has no alpha channel, so the buffer is narrowed first.
             let mut rgb = Vec::with_capacity((image.width * image.height * 3) as usize);
-            for px in image.rgba.chunks_exact(4) {
+            for px in image.rgba.as_chunks::<4>().0 {
                 rgb.extend_from_slice(&px[..3]);
             }
             let encoder =
@@ -158,12 +158,14 @@ fn encode_jxl(image: &Image) -> Result<Vec<u8>, String> {
     }
     // An opaque shot, which is nearly every shot, is written without the
     // alpha channel: a quarter less to compress.
-    let opaque = image.rgba.chunks_exact(4).all(|p| p[3] == 255);
+    let opaque = image.rgba.as_chunks::<4>().0.iter().all(|p| p[3] == 255);
     let rgb;
     let (pixels, colorspace) = if opaque {
         rgb = image
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[1], p[2]])
             .collect::<Vec<u8>>();
         (rgb.as_slice(), ColorSpace::RGB)

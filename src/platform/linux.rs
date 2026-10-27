@@ -294,7 +294,7 @@ pub fn capture_rect(r: Rect) -> Result<Image, String> {
         if reply.depth != 24 && reply.depth != 32 {
             return Err(format!("unsupported colour depth {}", reply.depth));
         }
-        for px in reply.data.chunks_exact(4) {
+        for px in reply.data.as_chunks::<4>().0 {
             rgba.extend_from_slice(&[px[2], px[1], px[0], 255]);
         }
         y += rows;

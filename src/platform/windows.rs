@@ -152,7 +152,7 @@ pub fn capture_rect(r: Rect) -> Result<Image, String> {
         }
 
         // GDI hands back BGRA with an alpha byte that is not meaningful here.
-        for px in buffer.chunks_exact_mut(4) {
+        for px in buffer.as_chunks_mut::<4>().0 {
             px.swap(0, 2);
             px[3] = 255;
         }

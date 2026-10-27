@@ -424,7 +424,7 @@ pub fn fill_mesh(dst: &mut Image, mesh: &Mesh, atlas: &egui::ColorImage) {
         [c.r() as f32, c.g() as f32, c.b() as f32, c.a() as f32].map(|v| v / 255.0)
     };
 
-    for tri in mesh.indices.chunks_exact(3) {
+    for tri in mesh.indices.as_chunks::<3>().0 {
         let mut v = [
             mesh.vertices[tri[0] as usize],
             mesh.vertices[tri[1] as usize],
