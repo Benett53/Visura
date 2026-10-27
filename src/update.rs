@@ -202,6 +202,7 @@ impl Updater {
 /// `visura --update`: check, and install a newer version if there is one.
 /// Returns the process exit code.
 pub fn run_cli() -> i32 {
+    cleanup();
     println!("Visura {CURRENT_VERSION}, checking for updates...");
     let release = match latest_release() {
         Ok(release) => release,
