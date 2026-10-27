@@ -247,8 +247,24 @@ pub struct Config {
     pub hotkeys: Hotkeys,
     pub overlay: Overlay,
     pub ui: Ui,
+    pub updates: Updates,
     /// The editor's last tool and every tool's style, kept between runs.
     pub editor: EditorPrefs,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Updates {
+    /// Ask GitHub for a newer release at most once a day.
+    pub check_automatically: bool,
+}
+
+impl Default for Updates {
+    fn default() -> Self {
+        Self {
+            check_automatically: true,
+        }
+    }
 }
 
 /// What the editor remembers. Written by the editor when it closes; editing
@@ -378,6 +394,7 @@ impl Default for Config {
             hotkeys: Hotkeys::default(),
             overlay: Overlay::default(),
             ui: Ui::default(),
+            updates: Updates::default(),
             editor: EditorPrefs::default(),
         }
     }

@@ -129,6 +129,7 @@ pub struct App {
     visible: bool,
     quitting: bool,
     startup_note: Option<String>,
+    pub updater: crate::update::Updater,
 }
 
 impl App {
@@ -184,6 +185,14 @@ impl App {
             });
         }
 
+        let updater = {
+            let ctx = cc.egui_ctx.clone();
+            let state = Config::path().with_file_name("last-update-check");
+            crate::update::Updater::new(config.updates.check_automatically, state, move || {
+                ctx.request_repaint()
+            })
+        };
+
         let tray = tray::Tray::new(cc.egui_ctx.clone());
         let shots = library::scan(&config.folder);
 
@@ -224,6 +233,7 @@ impl App {
             visible: !start_hidden,
             quitting: false,
             startup_note: problem,
+            updater,
         };
         app.rebuild_view();
         app
@@ -501,6 +511,8 @@ impl App {
         let autostart_changed = self.draft.autostart != self.config.autostart;
 
         self.config = self.draft.clone();
+        self.updater
+            .set_automatic(self.config.updates.check_automatically);
         if let Err(e) = self.config.save() {
             self.warn(format!("The settings were not saved: {e}"));
             return;
@@ -919,6 +931,11 @@ impl eframe::App for App {
         self.tick_capture(ctx);
         if self.pending.is_none() && self.overlay.is_none() {
             self.sweep_old_shots();
+        }
+
+        // The new version is being installed and takes over from here.
+        if self.updater.wants_exit() {
+            self.quitting = true;
         }
 
         if self.quitting {

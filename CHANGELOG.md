@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.1
+
+Added:
+
+- Updates from the settings: the current version, "Check for updates" and
+  "Download and install". A small dot next to Settings shows when a new
+  version is out; there are no pop-ups.
+- Automatic check at most once a day, switchable in the settings.
+- `visura --update` installs the latest release from a terminal.
+- Releases carry `SHA256SUMS` and a minisign signature. An update is installed
+  only if both checks pass.
+
 ## 0.4.0
 
 Added:

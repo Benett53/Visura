@@ -88,11 +88,25 @@ jobs:
           awk '/^## /{ if (seen) exit; seen = 1; next } seen' CHANGELOG.md > NOTES.md
           cat NOTES.md
 
+      # Checksums and their signature are what the in-app updater trusts.
+      - name: Checksums and signature
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq minisign
+          sha256sum VisuraSetup.exe Visura.exe visura-linux-x86_64 > SHA256SUMS
+          cat SHA256SUMS
+          echo "$MINISIGN_SECRET_KEY" > minisign.key
+          minisign -S -s minisign.key -m SHA256SUMS -x SHA256SUMS.minisig -t "Visura ${{ github.ref_name }}"
+          rm minisign.key
+
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             VisuraSetup.exe
             Visura.exe
             visura-linux-x86_64
+            SHA256SUMS
+            SHA256SUMS.minisig
           body_path: NOTES.md
           draft: false

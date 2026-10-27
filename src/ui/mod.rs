@@ -261,7 +261,24 @@ fn sidebar(app: &mut App, ui: &mut egui::Ui) {
             ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
                 ui.add_space(10.0);
                 let on_settings = app.page == Page::Settings;
-                if nav_item(ui, &palette, "Settings", on_settings).clicked() {
+                let settings = nav_item(ui, &palette, "Settings", on_settings);
+                // A small dot instead of a pop-up when a new version is out.
+                if app.updater.available().is_some() {
+                    let rect = settings.rect;
+                    ui.painter().circle_filled(
+                        egui::pos2(rect.right() - 14.0, rect.center().y),
+                        3.5,
+                        palette.accent,
+                    );
+                }
+                if settings
+                    .on_hover_text_at_pointer(if app.updater.available().is_some() {
+                        "A new version is available"
+                    } else {
+                        "Settings"
+                    })
+                    .clicked()
+                {
                     if on_settings {
                         app.page = Page::Recent;
                     } else {

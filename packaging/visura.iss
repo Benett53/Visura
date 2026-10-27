@@ -53,6 +53,8 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 [Run]
 Filename: "{app}\Visura.exe"; Description: "Start {#AppName}"; \
   Flags: nowait postinstall skipifsilent
+Filename: "{app}\Visura.exe"; Parameters: "--updated"; \
+  Flags: nowait runasoriginaluser; Check: RestartAfterUpdate
 
 [UninstallDelete]
 ; Thumbnails are rebuilt on demand and mean nothing without the program.
@@ -61,6 +63,13 @@ Filename: "{app}\Visura.exe"; Description: "Start {#AppName}"; \
 Type: filesandordirs; Name: "{localappdata}\{#AppName}"
 
 [Code]
+{ Visura passes /restartapp=1 when it installs an update of itself, so it comes
+  back after the silent install instead of staying closed. }
+function RestartAfterUpdate(): Boolean;
+begin
+  Result := WizardSilent() and (ExpandConstant('{param:restartapp|0}') = '1');
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usPostUninstall then

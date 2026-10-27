@@ -36,7 +36,7 @@ on the clipboard, and the window keeps the last few within reach.
 - Dark, black and light themes, seven accents
 
 No upload, no account, no sharing. Screenshots go into a folder and stay
-there.
+there. The only network access is the update check (see [Updates](#updates)).
 
 The full library, with search and day headings, opens in a window of its own:
 
@@ -55,7 +55,31 @@ release installs over the old one and keeps the settings.
 
 Neither is code signed, so SmartScreen warns once: "More info" → "Run anyway".
 
-**Linux:** build from source, see below. There is no package yet.
+**Linux:** download `visura-linux-x86_64` from the same release, make it
+executable and put it on the `PATH`, for example as `~/.local/bin/visura`:
+
+```
+install -m 755 visura-linux-x86_64 ~/.local/bin/visura
+```
+
+Or build from source, see below.
+
+### Updates
+
+Settings → Updates shows the version and has a button that downloads and
+installs the latest release; Visura then starts again. A small dot next to
+Settings in the sidebar shows when a new version is out. With "Check for
+updates automatically once a day" on, Visura asks GitHub for the latest release
+at most once a day; that is its only network access.
+
+`visura --update` does the same from a terminal.
+
+An update is installed only if `SHA256SUMS` carries a valid minisign signature
+from the key built into Visura and the downloaded file matches its checksum.
+The installed Windows version runs the new setup silently; the portable
+`Visura.exe` and the Linux binary replace themselves. A Linux binary in a
+folder that is not writable, such as `/usr/local/bin`, is replaced after the
+password prompt of the desktop.
 
 ## Using it
 
@@ -279,8 +303,8 @@ that sets it. Almost all do.
 cargo build --release
 ```
 
-Rust 1.85 or newer. No C toolchain, and no system libraries beyond X11 and a GL
-loader on Linux:
+Rust 1.88 or newer and a C compiler (for the TLS library of the update check).
+No system libraries beyond X11 and a GL loader on Linux:
 
 ```
 libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev

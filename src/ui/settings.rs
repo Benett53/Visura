@@ -61,6 +61,7 @@ impl App {
                 self.shortcut_section(ui, &palette);
                 self.overlay_section(ui, &palette);
                 self.appearance_section(ui, &palette);
+                self.update_section(ui, &palette);
                 ui.add_space(16.0);
             });
     }
@@ -435,6 +436,65 @@ impl App {
                 );
                 ui.checkbox(&mut self.draft.ui.start_hidden, "Start without a window");
             }
+        });
+    }
+
+    fn update_section(&mut self, ui: &mut egui::Ui, palette: &theme::Palette) {
+        use crate::update::{CURRENT_VERSION, Status};
+
+        let status = self.updater.status();
+        let ctx = ui.ctx().clone();
+        let wake = move || ctx.request_repaint();
+        section(ui, palette, "Updates", |ui| {
+            ui.horizontal(|ui| {
+                ui.label(format!("Version {CURRENT_VERSION}"));
+                let (line, colour) = match &status {
+                    Status::Idle => (String::new(), palette.muted),
+                    Status::Checking => ("Checking...".into(), palette.muted),
+                    Status::UpToDate => ("Up to date".into(), palette.muted),
+                    Status::Available(release) => (
+                        format!("Version {} is available", release.version),
+                        palette.accent,
+                    ),
+                    Status::Downloading(received, Some(total)) if *total > 0 => (
+                        format!("Downloading... {} %", received * 100 / total),
+                        palette.muted,
+                    ),
+                    Status::Downloading(..) => ("Downloading...".into(), palette.muted),
+                    Status::Installing => ("Installing, Visura restarts...".into(), palette.muted),
+                    Status::Failed(error) => (error.clone(), palette.danger),
+                };
+                if !line.is_empty() {
+                    ui.label(RichText::new(line).color(colour));
+                }
+            });
+            ui.add_space(4.0);
+            let busy = matches!(
+                status,
+                Status::Checking | Status::Downloading(..) | Status::Installing
+            );
+            ui.add_enabled_ui(!busy, |ui| match &status {
+                Status::Available(release) => {
+                    let label = format!("Download and install {}", release.version);
+                    if ui.button(label).clicked() {
+                        self.updater.install(release.clone(), wake);
+                    }
+                }
+                _ => {
+                    if ui.button("Check for updates").clicked() {
+                        self.updater.check(wake);
+                    }
+                }
+            });
+            if busy {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(250));
+            }
+            ui.add_space(4.0);
+            ui.checkbox(
+                &mut self.draft.updates.check_automatically,
+                "Check for updates automatically once a day",
+            );
         });
     }
 

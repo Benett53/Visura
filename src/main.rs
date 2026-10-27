@@ -17,6 +17,7 @@ mod platform;
 mod thumbs;
 mod tray;
 mod ui;
+mod update;
 
 use std::sync::Mutex;
 
@@ -35,6 +36,7 @@ Options:
                    take a screenshot; a running Visura does it, otherwise
                    Visura starts in the background and does it
   --background     start without a window, shortcuts and tray only
+  --update         install the latest release if it is newer
   --version        print the version
   --help           this help
 
@@ -74,6 +76,10 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    if args.iter().any(|a| a == "--update") {
+        std::process::exit(update::run_cli());
+    }
+
     let shot = match shot_argument(&args) {
         Ok(shot) => shot,
         Err(e) => {
@@ -87,8 +93,21 @@ fn main() -> eframe::Result<()> {
     let start_hidden =
         shot.is_some() || args.iter().any(|a| a == "--background") || config.ui.start_hidden;
 
+    // Started by an update: the previous copy is still shutting down and
+    // holds the single-instance slot for a moment longer.
+    let updated = args.iter().any(|a| a == "--updated");
+    let request = shot.unwrap_or(platform::Request::Show);
+    let mut instance = platform::acquire_single_instance(request);
+    for _ in 0..50 {
+        if instance.is_some() || !updated {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        instance = platform::acquire_single_instance(request);
+    }
+
     // A second copy would fight over the hotkeys, so it hands over instead.
-    match platform::acquire_single_instance(shot.unwrap_or(platform::Request::Show)) {
+    match instance {
         Some(guard) => {
             if let Ok(mut slot) = INSTANCE.lock() {
                 *slot = Some(guard);
