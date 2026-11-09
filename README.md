@@ -272,8 +272,11 @@ X11 is the native path: it can read the whole screen and the geometry of every
 window, which is what the overlay is built on.
 
 On Wayland Visura runs through XWayland. Reading the screen is not allowed
-there, so the capture goes through the desktop's own screenshot tool:
-`spectacle` on KDE, `gnome-screenshot` on GNOME, `grim` (or `wayshot`) on Sway,
+there. On KDE Plasma Visura asks KWin directly (`org.kde.KWin.ScreenShot2`,
+the interface Spectacle uses), which takes about 15 ms. Should KWin refuse,
+add `X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2` to Visura's
+desktop entry. Otherwise the capture goes through the desktop's own
+screenshot tool: `spectacle` on KDE, `gnome-screenshot` on GNOME, `grim` (or `wayshot`) on Sway,
 Hyprland and other wlroots desktops. One of them has to be installed. Display
 scaling is handled: the frame from the tool may have more pixels than XWayland
 counts, and selections are scaled into it.

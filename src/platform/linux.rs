@@ -25,6 +25,7 @@ use x11rb::rust_connection::RustConnection;
 
 use super::{Image, LocalTime, Rect, Request, WindowInfo};
 
+mod kwin;
 mod wayland;
 mod xdnd;
 
@@ -233,12 +234,54 @@ pub fn restore_window_placement(_placement: &Placement, _shown: bool, _minimized
     false
 }
 
-/// X11 hides a window synchronously and has no open or close animation, so
-/// the two helpers the Windows backend needs for that have no counterpart.
-///
-/// This always reports the window as gone, which is what the capture waits for.
+/// The X window Visura draws into, once the UI has reported it.
+static OWN_WINDOW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Tell the platform layer which X window is ours.
+pub fn remember_own_window(window: u32) {
+    let previous = OWN_WINDOW.swap(window, std::sync::atomic::Ordering::Relaxed);
+    if previous != window {
+        skip_close_animation(window);
+    }
+}
+
+/// Ask KWin not to animate our window away. Without this the frozen overlay
+/// fades out over the live desktop after a selection, which looks like the
+/// screen stutters. Other window managers ignore the property.
+fn skip_close_animation(window: u32) {
+    let Some(d) = display() else {
+        return;
+    };
+    let Some(property) = atom(d, "_KDE_NET_WM_SKIP_CLOSE_ANIMATION") else {
+        return;
+    };
+    use x11rb::wrapper::ConnectionExt as _;
+    let _ = d.conn.change_property32(
+        x11rb::protocol::xproto::PropMode::REPLACE,
+        window,
+        property,
+        AtomEnum::CARDINAL,
+        &[1],
+    );
+    let _ = d.conn.flush();
+}
+
+/// Whether our window is mapped. Hiding is not instant under a compositor,
+/// and eframe maps the window once on its own after the first frame, even
+/// when it was created hidden; both are caught by asking the X server.
 pub fn own_window_is_visible() -> bool {
-    false
+    let window = OWN_WINDOW.load(std::sync::atomic::Ordering::Relaxed);
+    if window == 0 {
+        return false;
+    }
+    let Some(d) = display() else {
+        return false;
+    };
+    d.conn
+        .get_window_attributes(window)
+        .ok()
+        .and_then(|c| c.reply().ok())
+        .is_some_and(|a| a.map_state == x11rb::protocol::xproto::MapState::VIEWABLE)
 }
 
 /// Where the mouse is right now, in physical screen pixels.
@@ -458,6 +501,17 @@ pub fn capture_active_window() -> Option<Result<Image, String>> {
 /// replace the overlay rather than feed it. These helpers hand back a plain
 /// image instead, which is exactly what is needed.
 fn capture_via_helper() -> Result<Image, String> {
+    // On KDE the compositor hands the frame over directly, which is what
+    // makes the overlay appear without a noticeable pause.
+    let kwin_error = if desktop().contains("kde") {
+        match kwin::capture_workspace() {
+            Ok(image) => return Ok(image),
+            Err(e) => Some(e),
+        }
+    } else {
+        None
+    };
+
     let target = std::env::temp_dir().join(format!("visura-frame-{}.png", std::process::id()));
     let path = target.to_string_lossy().into_owned();
 
@@ -483,7 +537,7 @@ fn capture_via_helper() -> Result<Image, String> {
     // X11, in case the connection failed for some other reason
     candidates.push(("scrot", vec!["-o", path.as_str()]));
 
-    let mut failures = Vec::new();
+    let mut failures: Vec<String> = kwin_error.into_iter().collect();
     let mut seen = Vec::new();
     for (program, args) in candidates {
         if seen.contains(&program) {

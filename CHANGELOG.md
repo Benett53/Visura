@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.2
+
+Changed:
+
+- On KDE Plasma (Wayland) the screen is read directly from KWin instead of
+  through `spectacle`. The region overlay appears about half a second sooner;
+  `spectacle` remains the fallback.
+
+Fixed:
+
+- Linux: `--background`, and a `--shot` that started Visura, showed the main
+  window anyway, and the screenshot then contained it.
+- Linux: after a region selection, KWin faded the frozen overlay out over the
+  live desktop, and the window could briefly show at its normal size before
+  it disappeared.
+
 ## 0.4.1
 
 Added:

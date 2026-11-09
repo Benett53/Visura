@@ -807,6 +807,12 @@ impl App {
         platform::set_overlay_active(false);
         self.overlay = None;
         self.pending = None;
+        // Going back to a hidden window: unmap first, then undo full screen
+        // and decorations. The other order shows the frozen frame shrinking
+        // back to window size for a moment before it disappears.
+        if self.overlay_restore == Restore::Hidden {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
         ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
             egui::WindowLevel::Normal,
         ));
@@ -888,7 +894,31 @@ impl App {
 impl eframe::App for App {
     /// Runs even while the window is hidden, which is where a tray application
     /// spends most of its life.
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // eframe maps the window after its first frame even when it was
+        // created hidden, so `--background` and a first `--shot` showed the
+        // window, and the shot then contained it. Hidden means unmapped.
+        #[cfg(target_os = "linux")]
+        {
+            use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+            if let Ok(handle) = frame.window_handle() {
+                match handle.as_raw() {
+                    RawWindowHandle::Xlib(x) => platform::remember_own_window(x.window as u32),
+                    RawWindowHandle::Xcb(x) => platform::remember_own_window(x.window.get()),
+                    _ => {}
+                }
+            }
+            if !self.visible
+                && self.overlay.is_none()
+                && self.pending.is_none()
+                && platform::own_window_is_visible()
+            {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = frame;
+
         if let Some((placement, restore)) = self.deferred_placement.take() {
             let shown = restore != Restore::Hidden;
             let minimized = restore == Restore::Minimized;
