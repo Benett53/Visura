@@ -908,6 +908,11 @@ impl eframe::App for App {
                     _ => {}
                 }
             }
+            if self.overlay.is_none() && self.pending.is_none() {
+                // Puts the normal window type back after an overlay, once the
+                // overlay is off the screen. Does nothing otherwise.
+                platform::set_overlay_active(false);
+            }
             if !self.visible
                 && self.overlay.is_none()
                 && self.pending.is_none()

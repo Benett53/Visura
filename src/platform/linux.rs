@@ -163,8 +163,87 @@ pub fn ctrl_key_down() -> bool {
 /// Only Windows needs the overlay oversized; see the Windows version.
 pub const OVERLAY_OVERSCAN: i32 = 0;
 
-/// Only Windows needs telling; see the Windows version.
-pub fn set_overlay_active(_active: bool) {}
+/// Whether the overlay changed the window type and has to change it back.
+static OVERLAY_RETYPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Prepare the window for the overlay, or undo that.
+///
+/// Open and close effects (KWin's own, and Burn My Windows which some setups
+/// add) animate every normal application window as it appears. The overlay
+/// is a frozen frame of the screen; growing or flickering into view is what
+/// made taking a shot feel unclean. Those effects leave utility windows
+/// alone, so while hidden the window is typed as one before it is mapped, and
+/// asked to appear full screen and above everything right away instead of
+/// being resized into place afterwards. A window already on screen keeps its
+/// type: it is not added again, so nothing animates it.
+///
+/// `false` puts the normal type back once the window is gone; it is called
+/// again on every pass while hidden until that has happened.
+pub fn set_overlay_active(active: bool) {
+    use std::sync::atomic::Ordering;
+    use x11rb::protocol::xproto::PropMode;
+    use x11rb::wrapper::ConnectionExt as _;
+
+    // Called on every pass while hidden: nothing to do costs no round trip.
+    if !active && !OVERLAY_RETYPED.load(Ordering::Relaxed) {
+        return;
+    }
+    let window = OWN_WINDOW.load(Ordering::Relaxed);
+    let Some(d) = display() else {
+        return;
+    };
+    if window == 0 {
+        return;
+    }
+    let (Some(window_type), Some(state)) =
+        (atom(d, "_NET_WM_WINDOW_TYPE"), atom(d, "_NET_WM_STATE"))
+    else {
+        return;
+    };
+
+    if active {
+        if own_window_is_visible() {
+            return;
+        }
+        let (Some(utility), Some(fullscreen), Some(above)) = (
+            atom(d, "_NET_WM_WINDOW_TYPE_UTILITY"),
+            atom(d, "_NET_WM_STATE_FULLSCREEN"),
+            atom(d, "_NET_WM_STATE_ABOVE"),
+        ) else {
+            return;
+        };
+        let _ = d.conn.change_property32(
+            PropMode::REPLACE,
+            window,
+            window_type,
+            AtomEnum::ATOM,
+            &[utility],
+        );
+        let _ = d.conn.change_property32(
+            PropMode::REPLACE,
+            window,
+            state,
+            AtomEnum::ATOM,
+            &[fullscreen, above],
+        );
+        OVERLAY_RETYPED.store(true, Ordering::Relaxed);
+    } else if OVERLAY_RETYPED.load(Ordering::Relaxed) && !own_window_is_visible() {
+        // Only once the overlay is off the screen: changing the type of the
+        // mapped window would let the window manager restyle it in view.
+        OVERLAY_RETYPED.store(false, Ordering::Relaxed);
+        if let Some(normal) = atom(d, "_NET_WM_WINDOW_TYPE_NORMAL") {
+            let _ = d.conn.change_property32(
+                PropMode::REPLACE,
+                window,
+                window_type,
+                AtomEnum::ATOM,
+                &[normal],
+            );
+        }
+        let _ = d.conn.delete_property(window, state);
+    }
+    let _ = d.conn.flush();
+}
 
 /// Whether a Super key is held. egui has no modifier for it.
 pub fn super_key_down() -> bool {

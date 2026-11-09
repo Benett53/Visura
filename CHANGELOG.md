@@ -15,6 +15,9 @@ Fixed:
 - Linux: after a region selection, KWin faded the frozen overlay out over the
   live desktop, and the window could briefly show at its normal size before
   it disappeared.
+- Linux: window open and close effects animated the region overlay like a
+  new application window. It now appears as a utility window, already full
+  screen and on top, which those effects leave alone.
 - Linux: Visura running in the background could sit minimised on the task
   bar. It is now withdrawn completely.
 - Linux: a hidden Visura woke up eight times a second. It now sleeps until a
