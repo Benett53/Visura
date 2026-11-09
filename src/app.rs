@@ -914,6 +914,7 @@ impl eframe::App for App {
                 && platform::own_window_is_visible()
             {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                platform::withdraw_own_window();
             }
         }
         #[cfg(not(target_os = "linux"))]
@@ -970,12 +971,14 @@ impl eframe::App for App {
 
         if self.quitting {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            return;
         }
 
-        if !self.visible {
-            // Hidden means no rendering at all, just a slow pulse so a hotkey
-            // or a tray click is noticed within a fraction of a second.
+        // Hidden means no rendering at all, just a slow pulse so a tray click
+        // is noticed within a fraction of a second. Linux has no tray, and
+        // shortcuts and `--shot` requests wake the program themselves, so a
+        // hidden Visura sleeps there until one arrives.
+        #[cfg(not(target_os = "linux"))]
+        if !self.visible && !self.quitting {
             ctx.request_repaint_after(Duration::from_millis(120));
         }
     }

@@ -15,6 +15,10 @@ Fixed:
 - Linux: after a region selection, KWin faded the frozen overlay out over the
   live desktop, and the window could briefly show at its normal size before
   it disappeared.
+- Linux: Visura running in the background could sit minimised on the task
+  bar. It is now withdrawn completely.
+- Linux: a hidden Visura woke up eight times a second. It now sleeps until a
+  shortcut or `visura --shot` arrives.
 
 ## 0.4.1
 

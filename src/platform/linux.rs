@@ -245,6 +245,38 @@ pub fn remember_own_window(window: u32) {
     }
 }
 
+/// Take our window off the screen and off the task bar.
+///
+/// Unmapping alone does not do that for a minimised window, which is already
+/// unmapped: ICCCM wants a synthetic UnmapNotify sent to the root window so
+/// the window manager withdraws it (this is what `XWithdrawWindow` does).
+pub fn withdraw_own_window() {
+    use x11rb::protocol::xproto::{EventMask, UNMAP_NOTIFY_EVENT, UnmapNotifyEvent};
+
+    let window = OWN_WINDOW.load(std::sync::atomic::Ordering::Relaxed);
+    let Some(d) = display() else {
+        return;
+    };
+    if window == 0 {
+        return;
+    }
+    let _ = d.conn.unmap_window(window);
+    let event = UnmapNotifyEvent {
+        response_type: UNMAP_NOTIFY_EVENT,
+        sequence: 0,
+        event: d.root,
+        window,
+        from_configure: false,
+    };
+    let _ = d.conn.send_event(
+        false,
+        d.root,
+        EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+        event,
+    );
+    let _ = d.conn.flush();
+}
+
 /// Ask KWin not to animate our window away. Without this the frozen overlay
 /// fades out over the live desktop after a selection, which looks like the
 /// screen stutters. Other window managers ignore the property.
@@ -266,9 +298,10 @@ fn skip_close_animation(window: u32) {
     let _ = d.conn.flush();
 }
 
-/// Whether our window is mapped. Hiding is not instant under a compositor,
-/// and eframe maps the window once on its own after the first frame, even
-/// when it was created hidden; both are caught by asking the X server.
+/// Whether our window is on screen or on the task bar. Hiding is not instant
+/// under a compositor, and eframe maps the window once on its own after the
+/// first frame, even when it was created hidden (KWin may then minimise it);
+/// both are caught by asking the X server.
 pub fn own_window_is_visible() -> bool {
     let window = OWN_WINDOW.load(std::sync::atomic::Ordering::Relaxed);
     if window == 0 {
@@ -277,11 +310,18 @@ pub fn own_window_is_visible() -> bool {
     let Some(d) = display() else {
         return false;
     };
-    d.conn
+    let mapped = d
+        .conn
         .get_window_attributes(window)
         .ok()
         .and_then(|c| c.reply().ok())
-        .is_some_and(|a| a.map_state == x11rb::protocol::xproto::MapState::VIEWABLE)
+        .is_some_and(|a| a.map_state == x11rb::protocol::xproto::MapState::VIEWABLE);
+    // A minimised window is unmapped but still has a task bar entry. ICCCM
+    // `WM_STATE` tells it apart from a withdrawn one: 3 is iconic.
+    mapped
+        || atom(d, "WM_STATE")
+            .and_then(|state| cardinals(d, window, state))
+            .is_some_and(|values| values.first() == Some(&3))
 }
 
 /// Where the mouse is right now, in physical screen pixels.
