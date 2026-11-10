@@ -37,6 +37,9 @@ Options:
                    Visura starts in the background and does it
   --background     start without a window, shortcuts and tray only
   --update         install the latest release if it is newer
+  --install        Linux: copy Visura to ~/.local/bin and add a menu entry
+                   with an icon and actions for keyboard shortcuts
+  --uninstall      Linux: remove them again; settings and screenshots stay
   --version        print the version
   --help           this help
 
@@ -80,6 +83,28 @@ fn main() -> eframe::Result<()> {
         std::process::exit(update::run_cli());
     }
 
+    #[cfg(all(unix, not(target_os = "macos")))]
+    for (flag, action) in [
+        (
+            "--install",
+            platform::install as fn() -> Result<String, String>,
+        ),
+        ("--uninstall", platform::uninstall),
+    ] {
+        if args.iter().any(|a| a == flag) {
+            match action() {
+                Ok(report) => {
+                    println!("{report}");
+                    return Ok(());
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+
     let shot = match shot_argument(&args) {
         Ok(shot) => shot,
         Err(e) => {
@@ -87,6 +112,8 @@ fn main() -> eframe::Result<()> {
             std::process::exit(2);
         }
     };
+
+    platform::tune_memory();
 
     let (config, _) = config::Config::load();
     // Asked for a shot only: the window stays out of the way.

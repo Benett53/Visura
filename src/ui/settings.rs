@@ -429,13 +429,11 @@ impl App {
             ui.add_space(8.0);
             ui.checkbox(&mut self.draft.ui.confirm_delete, "Ask before deleting");
             ui.checkbox(&mut self.draft.autostart, "Start with the system");
-            if cfg!(windows) {
-                ui.checkbox(
-                    &mut self.draft.ui.close_to_tray,
-                    "Closing only hides Visura in the notification area",
-                );
-                ui.checkbox(&mut self.draft.ui.start_hidden, "Start without a window");
-            }
+            ui.checkbox(
+                &mut self.draft.ui.close_to_tray,
+                "Closing only hides Visura in the notification area",
+            );
+            ui.checkbox(&mut self.draft.ui.start_hidden, "Start without a window");
         });
     }
 

@@ -5,9 +5,10 @@
 //!
 //! Under Wayland neither is allowed. XWayland answers the connection but
 //! `GetImage` on the root window fails, because the root is never rendered.
-//! The capture then falls back to the screenshot helper the desktop ships,
-//! which yields the same frozen frame the overlay needs. Window outlines are
-//! not available that way, so the overlay simply does not draw them.
+//! The capture then goes through the compositor (KWin) or the screenshot
+//! helper the desktop ships, which yields the same frozen frame the overlay
+//! needs. Window outlines come from the compositor where it answers, see
+//! `wayland`.
 
 use std::io::{Read as _, Write as _};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -589,10 +590,12 @@ pub fn overlay_fullscreen() -> bool {
         .is_some_and(|reply| reply.monitors.len() == 1)
 }
 
-/// The window in front as an image of its own, straight from the desktop's
-/// screenshot tool, where that is the only way to know which window it is.
-/// KDE and GNOME do not tell other programs where their windows are.
-pub fn capture_active_window() -> Option<Result<Image, String>> {
+/// The window in front as an image of its own, straight from the desktop,
+/// where that is the only way to know which window it is, together with what
+/// the compositor says about that window. KWin hands the pixels over itself;
+/// GNOME does not tell other programs where its windows are, so its
+/// screenshot tool takes the picture.
+pub fn capture_active_window() -> Option<Result<(Image, Option<WindowInfo>), String>> {
     if !is_wayland() {
         return None;
     }
@@ -600,6 +603,11 @@ pub fn capture_active_window() -> Option<Result<Image, String>> {
     let target = std::env::temp_dir().join(format!("visura-window-{}.png", std::process::id()));
     let path = target.to_string_lossy().into_owned();
     let (program, args): (&str, Vec<&str>) = if desktop.contains("kde") {
+        // Asked first: taking the picture must not change the answer.
+        let window = wayland::focused(virtual_screen());
+        if let Ok(image) = kwin::capture_active_window() {
+            return Some(Ok((image, window)));
+        }
         ("spectacle", vec!["-b", "-n", "-a", "-o", &path])
     } else if desktop.contains("gnome") {
         ("gnome-screenshot", vec!["-w", "-f", &path])
@@ -608,7 +616,7 @@ pub fn capture_active_window() -> Option<Result<Image, String>> {
     };
     let _ = std::fs::remove_file(&target);
     match run_helper(program, &args)? {
-        Ok(()) => Some(read_image(&target, program)),
+        Ok(()) => Some(read_image(&target, program).map(|image| (image, None))),
         Err(e) => Some(Err(e)),
     }
 }
@@ -1044,6 +1052,34 @@ pub fn cache_dir() -> PathBuf {
         .join("visura")
 }
 
+// ---------------------------------------------------------------- memory ----
+
+/// Keep whole frames out of the heap.
+///
+/// A desktop frame is tens of megabytes. glibc serves blocks that large with
+/// `mmap` and returns them on `free`, but it also raises the limit for that
+/// each time such a block is freed, up to 32 MB. After the first shot the
+/// frames come out of the heap instead, where freed memory mostly stays with
+/// the process: a hidden Visura grew by some 200 MB over a few shots. A fixed
+/// limit switches the adjustment off.
+pub fn tune_memory() {
+    #[cfg(target_env = "gnu")]
+    // SAFETY: mallopt only changes a tuning value of the allocator.
+    unsafe {
+        libc::mallopt(libc::M_MMAP_THRESHOLD, 1 << 20);
+    }
+}
+
+/// Hand freed heap memory back to the system. Worth it after a capture, when
+/// the encoders have let go of their many smaller buffers.
+pub fn release_memory() {
+    #[cfg(target_env = "gnu")]
+    // SAFETY: malloc_trim has no preconditions.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 // ------------------------------------------------------------- autostart ----
 
 pub fn set_autostart(enabled: bool) -> Result<(), String> {
@@ -1078,6 +1114,124 @@ fn desktop_exec_quote(path: &str) -> String {
     quoted.push('"');
     // A literal percent sign must be doubled in the Exec key.
     quoted.replace('%', "%%")
+}
+
+// --------------------------------------------------------------- install ----
+
+/// Where `--install` puts things: all inside the home directory, in the
+/// places the desktop looks at by itself.
+struct InstallPaths {
+    binary: PathBuf,
+    desktop_entry: PathBuf,
+    icon: PathBuf,
+}
+
+fn install_paths() -> Result<InstallPaths, String> {
+    let home = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .ok_or("HOME is not set")?;
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/share"));
+    Ok(InstallPaths {
+        binary: home.join(".local/bin/visura"),
+        desktop_entry: data.join("applications/visura.desktop"),
+        icon: data.join("icons/hicolor/256x256/apps/visura.png"),
+    })
+}
+
+/// The menu entry. Its actions are what a desktop offers for keyboard
+/// shortcuts, and the restricted interface is what lets KWin hand Visura the
+/// screen without asking.
+fn desktop_entry(binary: &str) -> String {
+    let exec = desktop_exec_quote(binary);
+    format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=Visura\n\
+         Comment=Take screenshots\n\
+         Exec={exec}\n\
+         Icon=visura\n\
+         Terminal=false\n\
+         Categories=Utility;\n\
+         StartupWMClass=visura\n\
+         X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2\n\
+         Actions=region;window;screen;\n\
+         \n\
+         [Desktop Action region]\n\
+         Name=Capture region\n\
+         Exec={exec} --shot region\n\
+         \n\
+         [Desktop Action window]\n\
+         Name=Capture window\n\
+         Exec={exec} --shot window\n\
+         \n\
+         [Desktop Action screen]\n\
+         Name=Capture screen\n\
+         Exec={exec} --shot screen\n"
+    )
+}
+
+fn write_with_parents(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("{} could not be created: {e}", parent.display()))?;
+    }
+    std::fs::write(path, bytes).map_err(|e| format!("{} could not be written: {e}", path.display()))
+}
+
+/// Copy this program to `~/.local/bin` and give it a menu entry and an icon.
+/// Returns what was done, for the terminal.
+pub fn install() -> Result<String, String> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let paths = install_paths()?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let same = std::fs::canonicalize(&exe).ok() == std::fs::canonicalize(&paths.binary).ok();
+    if !same {
+        // Written next to the target and renamed over it: a running Visura
+        // keeps its old file, and nothing ever sees half a program.
+        let staged = paths.binary.with_extension("new");
+        let bytes =
+            std::fs::read(&exe).map_err(|e| format!("{} is unreadable: {e}", exe.display()))?;
+        write_with_parents(&staged, &bytes)?;
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
+            .and_then(|()| std::fs::rename(&staged, &paths.binary))
+            .map_err(|e| format!("{} could not be written: {e}", paths.binary.display()))?;
+    }
+    write_with_parents(&paths.icon, include_bytes!("../../assets/icon.png"))?;
+    write_with_parents(
+        &paths.desktop_entry,
+        desktop_entry(&paths.binary.to_string_lossy()).as_bytes(),
+    )?;
+    Ok(format!(
+        "Installed:\n  {}\n  {}\n  {}",
+        paths.binary.display(),
+        paths.desktop_entry.display(),
+        paths.icon.display()
+    ))
+}
+
+/// Remove what `install` and the autostart setting created. Settings and
+/// screenshots stay.
+pub fn uninstall() -> Result<String, String> {
+    let paths = install_paths()?;
+    let _ = set_autostart(false);
+    let mut removed = Vec::new();
+    for path in [&paths.desktop_entry, &paths.icon, &paths.binary] {
+        match std::fs::remove_file(path) {
+            Ok(()) => removed.push(format!("  {}", path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("{} could not be removed: {e}", path.display())),
+        }
+    }
+    if removed.is_empty() {
+        Ok("Nothing to remove.".into())
+    } else {
+        Ok(format!("Removed:\n{}", removed.join("\n")))
+    }
 }
 
 // -------------------------------------------------------- single instance ----
@@ -1163,6 +1317,44 @@ pub fn spawn_request_listener(guard: InstanceGuard, on_request: impl Fn(Request)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Needs a running desktop session:
+    /// `cargo test -- --ignored live_desktop --nocapture`
+    #[test]
+    #[ignore]
+    fn live_desktop_frame_and_windows() {
+        let start = std::time::Instant::now();
+        let (image, rect) = capture_screen().expect("no screen capture");
+        println!(
+            "frame {}×{} for {rect:?} after {:?}",
+            image.width,
+            image.height,
+            start.elapsed()
+        );
+        let start = std::time::Instant::now();
+        let windows = windows_in_z_order();
+        println!("{} windows after {:?}", windows.len(), start.elapsed());
+        for window in &windows {
+            println!("  {:?} {:?} {:?}", window.rect, window.app, window.title);
+        }
+        println!("front: {:?}", foreground_window().map(|w| w.title));
+    }
+
+    #[test]
+    fn the_menu_entry_offers_the_three_captures() {
+        let entry = desktop_entry("/home/a b/.local/bin/visura");
+        assert!(entry.starts_with("[Desktop Entry]\nType=Application\nName=Visura\n"));
+        assert!(entry.contains("\nExec=\"/home/a b/.local/bin/visura\"\n"));
+        assert!(entry.contains("\nActions=region;window;screen;\n"));
+        for mode in ["region", "window", "screen"] {
+            assert!(entry.contains(&format!("\n[Desktop Action {mode}]\n")));
+            assert!(entry.contains(&format!(
+                "\nExec=\"/home/a b/.local/bin/visura\" --shot {mode}\n"
+            )));
+        }
+        // No indentation may survive from the source: keys start the line.
+        assert!(entry.lines().all(|line| !line.starts_with(' ')));
+    }
 
     #[test]
     fn desktop_entries_quote_awkward_paths() {

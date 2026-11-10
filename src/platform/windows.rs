@@ -524,8 +524,14 @@ pub fn overlay_fullscreen() -> bool {
     false
 }
 
+/// The Windows heap needs no help; see Linux.
+pub fn tune_memory() {}
+
+/// See `tune_memory`.
+pub fn release_memory() {}
+
 /// Windows captures the active window from the full frame; see Linux.
-pub fn capture_active_window() -> Option<Result<Image, String>> {
+pub fn capture_active_window() -> Option<Result<(Image, Option<WindowInfo>), String>> {
     None
 }
 

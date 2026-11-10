@@ -55,12 +55,17 @@ release installs over the old one and keeps the settings.
 
 Neither is code signed, so SmartScreen warns once: "More info" → "Run anyway".
 
-**Linux:** download `visura-linux-x86_64` from the same release, make it
-executable and put it on the `PATH`, for example as `~/.local/bin/visura`:
+**Linux:** download `visura-linux-x86_64` from the same release and let it
+install itself:
 
 ```
-install -m 755 visura-linux-x86_64 ~/.local/bin/visura
+chmod +x visura-linux-x86_64
+./visura-linux-x86_64 --install
 ```
+
+That copies it to `~/.local/bin/visura` and adds a menu entry with an icon.
+`visura --uninstall` removes all of it again; settings and screenshots stay.
+The file also runs from wherever it is without installing.
 
 Or build from source, see below.
 
@@ -273,26 +278,34 @@ window, which is what the overlay is built on.
 
 On Wayland Visura runs through XWayland. Reading the screen is not allowed
 there. On KDE Plasma Visura asks KWin directly (`org.kde.KWin.ScreenShot2`,
-the interface Spectacle uses), which takes about 15 ms. Should KWin refuse,
-add `X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2` to Visura's
-desktop entry. Otherwise the capture goes through the desktop's own
-screenshot tool: `spectacle` on KDE, `gnome-screenshot` on GNOME, `grim` (or `wayshot`) on Sway,
-Hyprland and other wlroots desktops. One of them has to be installed. Display
-scaling is handled: the frame from the tool may have more pixels than XWayland
-counts, and selections are scaled into it.
+the interface Spectacle uses), which takes about 15 ms. KWin only answers
+programs whose desktop entry carries
+`X-KDE-DBUS-Restricted-Interfaces=org.kde.KWin.ScreenShot2`; the entry from
+`visura --install` does. Window positions come from KWin too, through a short
+script that is loaded for the moment of the capture. Otherwise the capture
+goes through the desktop's own screenshot tool: `spectacle` on KDE,
+`gnome-screenshot` on GNOME, `grim` (or `wayshot`) on Sway, Hyprland and other
+wlroots desktops. One of them has to be installed. Display scaling is handled:
+the frame may have more pixels than XWayland counts, and selections are scaled
+into it.
 
 | | KDE | GNOME | Sway, Hyprland |
 |---|---|---|---|
 | Region, full screen | yes | yes | yes |
-| Window | yes, via `spectacle -a` | yes, via `gnome-screenshot -w` | yes, via the compositor |
-| Window outlines in the overlay | no | no | yes |
+| Window | yes, via KWin | yes, via `gnome-screenshot -w` | yes, via the compositor |
+| Window outlines in the overlay | yes | no | yes |
 
-Global shortcuts only reach Visura while an X11 window has the keyboard. Add a
-shortcut in the desktop's keyboard settings that runs `visura --shot region`
-(or `window`, `screen`) instead; it hands the request to the running Visura.
+Global shortcuts only reach Visura while an X11 window has the keyboard. Bind
+the keys in the desktop's keyboard settings instead: the menu entry from
+`visura --install` has the actions "Capture region", "Capture window" and
+"Capture screen", which KDE lists under Visura in its shortcut settings.
+Anywhere else a shortcut that runs `visura --shot region` (or `window`,
+`screen`) does the same; it hands the request to the running Visura.
 
-No tray icon on Linux. It would mean a GTK and libayatana-appindicator
-dependency for one icon, so closing the window quits instead.
+The tray icon is a StatusNotifierItem: KDE Plasma shows it as it is, GNOME
+needs the AppIndicator extension. A left click opens the window, a middle
+click starts a region capture, a right click has the menu. Without anything
+that shows such icons, closing the window quits.
 
 Dragging out of the list uses XDND, so it needs X11 or XWayland. Where no drag
 can start, the file path goes to the clipboard instead.

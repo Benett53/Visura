@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.5.0
+
+Added:
+
+- Linux: tray icon (StatusNotifierItem) with the same menu as on Windows.
+  "Closing only hides Visura in the notification area" and "Start without a
+  window" are now available on Linux too.
+- KDE Plasma (Wayland): the region overlay outlines windows, and a click
+  takes the window under the cursor. The positions come from KWin.
+- Linux: `visura --install` copies Visura to `~/.local/bin` and adds a menu
+  entry with an icon and actions for keyboard shortcuts; `visura --uninstall`
+  removes them.
+
+Changed:
+
+- KDE Plasma (Wayland): the active window is read directly from KWin instead
+  of through `spectacle`, and the file is named after its program.
+
+Fixed:
+
+- Linux: a Visura running in the background kept the memory of every
+  capture, some 200 MB after a few full screen shots. It now returns to about
+  where it started.
+
 ## 0.4.2
 
 Changed:

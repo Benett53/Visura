@@ -22,6 +22,8 @@ const HIDE_TIMEOUT: Duration = Duration::from_millis(400);
 /// finish putting the pixels underneath back.
 const HIDE_SETTLE: Duration = Duration::from_millis(40);
 const TOAST_LIFETIME: Duration = Duration::from_secs(5);
+/// See `App::release_memory_at`.
+const RELEASE_MEMORY_AFTER: Duration = Duration::from_secs(2);
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub enum Page {
@@ -121,6 +123,9 @@ pub struct App {
     /// Which shortcut is currently listening for a key press.
     pub recording: Option<hotkeys::Action>,
     tray: Option<tray::Tray>,
+    /// When to hand the memory a capture needed back to the system: a moment
+    /// after it, once the encoders are done.
+    release_memory_at: Option<Instant>,
     /// Requests handed over by a second copy of the program, such as
     /// `visura --shot region` bound to a key in the desktop settings.
     requests: Arc<Mutex<Vec<platform::Request>>>,
@@ -228,6 +233,7 @@ impl App {
             history_open: false,
             recording: None,
             tray,
+            release_memory_at: None,
             requests,
             last_sweep: None,
             visible: !start_hidden,
@@ -677,7 +683,7 @@ impl App {
             && let Some(result) = platform::capture_active_window()
         {
             match result {
-                Ok(image) => self.store(&image, None),
+                Ok((image, window)) => self.store(&image, window.as_ref()),
                 Err(e) => self.warn(format!("The window could not be captured: {e}")),
             }
             self.finish_capture(ctx, pending.restore, pending.hiding);
@@ -729,6 +735,7 @@ impl App {
     }
 
     fn store(&mut self, image: &platform::Image, window: Option<&WindowInfo>) {
+        self.release_memory_at = Some(Instant::now() + RELEASE_MEMORY_AFTER);
         match capture::store(image, &self.config, window) {
             Ok(outcome) => {
                 for note in &outcome.notes {
@@ -967,6 +974,15 @@ impl eframe::App for App {
         self.tick_capture(ctx);
         if self.pending.is_none() && self.overlay.is_none() {
             self.sweep_old_shots();
+            if let Some(at) = self.release_memory_at {
+                let now = Instant::now();
+                if now >= at {
+                    self.release_memory_at = None;
+                    platform::release_memory();
+                } else {
+                    ctx.request_repaint_after(at - now);
+                }
+            }
         }
 
         // The new version is being installed and takes over from here.
@@ -979,7 +995,7 @@ impl eframe::App for App {
         }
 
         // Hidden means no rendering at all, just a slow pulse so a tray click
-        // is noticed within a fraction of a second. Linux has no tray, and
+        // is noticed within a fraction of a second. On Linux the tray,
         // shortcuts and `--shot` requests wake the program themselves, so a
         // hidden Visura sleeps there until one arrives.
         #[cfg(not(target_os = "linux"))]

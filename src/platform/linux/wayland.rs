@@ -2,10 +2,11 @@
 //!
 //! Wayland keeps window positions to the compositor, and there is no common
 //! protocol for asking. Two compositors answer on the command line, and those
-//! are used: Hyprland (`hyprctl`) and Sway (`swaymsg`). Everywhere else the
-//! list stays empty and the overlay simply offers no outlines, as before.
+//! are used: Hyprland (`hyprctl`) and Sway (`swaymsg`). KWin answers a script
+//! loaded over D-Bus, see `kwin`. Everywhere else the list stays empty and
+//! the overlay simply offers no outlines.
 //!
-//! Both report logical coordinates, while the frozen frame from the screenshot
+//! All of them report logical coordinates, while the frozen frame from the screenshot
 //! helper is in pixels. The layout is scaled onto the frame by comparing the
 //! two sizes, which is exact for a single scale factor across all monitors.
 
@@ -21,6 +22,10 @@ struct Entry {
     class: String,
     pid: Option<u32>,
     focused: bool,
+    /// Name the program after `class` rather than after its process. KWin's
+    /// class is the desktop file name, which says "lutris" and "vesktop"
+    /// where the processes are called "python3" and "electron".
+    named_by_class: bool,
 }
 
 /// Windows front to back plus the logical bounds of all monitors together.
@@ -37,6 +42,8 @@ pub fn windows(area: Rect) -> Vec<WindowInfo> {
         hyprland()
     } else if std::env::var_os("SWAYSOCK").is_some() {
         sway()
+    } else if is_kde() {
+        kde()
     } else {
         None
     };
@@ -53,6 +60,10 @@ pub fn focused(area: Rect) -> Option<WindowInfo> {
         parse_hyprland(&serde_json::json!([active]), &monitors)?
     } else if std::env::var_os("SWAYSOCK").is_some() {
         let mut layout = parse_sway(&json("swaymsg", &["-t", "get_tree", "-r"])?)?;
+        layout.windows.retain(|w| w.focused);
+        layout
+    } else if is_kde() {
+        let mut layout = kde()?;
         layout.windows.retain(|w| w.focused);
         layout
     } else {
@@ -83,6 +94,49 @@ fn hyprland() -> Option<Layout> {
 
 fn sway() -> Option<Layout> {
     parse_sway(&json("swaymsg", &["-t", "get_tree", "-r"])?)
+}
+
+fn is_kde() -> bool {
+    super::desktop().contains("kde")
+}
+
+fn kde() -> Option<Layout> {
+    parse_kwin(&serde_json::from_str(&super::kwin::window_report()?).ok()?)
+}
+
+/// `org.kde.dolphin` → `dolphin`: the last part of a reverse domain name.
+fn short_class(class: &str) -> String {
+    class.rsplit('.').next().unwrap_or(class).to_string()
+}
+
+/// KWin: the report of the script in `kwin`, already front to back and
+/// limited to what is on the current desktop.
+fn parse_kwin(report: &Value) -> Option<Layout> {
+    let bounds = Rect::new(0, 0, int(&report["width"]), int(&report["height"]));
+    if bounds.is_empty() {
+        return None;
+    }
+    // A window without a title is a helper surface of some program, such as
+    // a full screen backdrop, and nothing a person would point at.
+    let windows = report["windows"]
+        .as_array()?
+        .iter()
+        .filter(|w| w["title"].as_str().is_some_and(|title| !title.is_empty()))
+        .map(|w| Entry {
+            rect: Rect::new(
+                int(&w["x"]),
+                int(&w["y"]),
+                int(&w["width"]),
+                int(&w["height"]),
+            ),
+            title: text(&w["title"]),
+            class: short_class(w["class"].as_str().unwrap_or_default()),
+            pid: w["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok()),
+            focused: w["active"].as_bool().unwrap_or(false),
+            named_by_class: true,
+        })
+        .collect();
+    Some(Layout { windows, bounds })
 }
 
 fn int(value: &Value) -> i32 {
@@ -153,6 +207,7 @@ fn parse_hyprland(clients: &Value, monitors: &Value) -> Option<Layout> {
             class: text(&client["class"]),
             pid: client["pid"].as_u64().map(|p| p as u32),
             focused: recency == 0,
+            named_by_class: false,
         };
         ranked.push(((group, recency), entry));
     }
@@ -199,6 +254,7 @@ fn parse_sway(tree: &Value) -> Option<Layout> {
                         class,
                         pid: node["pid"].as_u64().map(|p| p as u32),
                         focused: node["focused"].as_bool().unwrap_or(false),
+                        named_by_class: false,
                     },
                 ));
             }
@@ -273,11 +329,15 @@ fn to_screen(layout: &Layout, area: Rect) -> Vec<WindowInfo> {
             if rect.w < 8 || rect.h < 8 {
                 return None;
             }
-            let app = entry
-                .pid
-                .and_then(|pid| std::fs::read_to_string(format!("/proc/{pid}/comm")).ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
+            let app = Some(entry.class.clone())
+                .filter(|class| entry.named_by_class && !class.is_empty())
+                .or_else(|| {
+                    entry
+                        .pid
+                        .and_then(|pid| std::fs::read_to_string(format!("/proc/{pid}/comm")).ok())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                })
                 .unwrap_or_else(|| entry.class.clone());
             Some(WindowInfo {
                 rect,
@@ -355,5 +415,33 @@ mod tests {
             .map(|w| (w.title.as_str(), w.class.as_str()))
             .collect();
         assert_eq!(names, [("calc", "Galculator"), ("editor", "code")]);
+    }
+
+    #[test]
+    fn kwin_reports_logical_rectangles_front_to_back() {
+        let report = serde_json::json!({
+            "width": 1720, "height": 720,
+            "windows": [
+                {"x": 100, "y": 50, "width": 400, "height": 300, "title": "Notes",
+                 "class": "org.kde.kate", "pid": 4242, "active": true},
+                {"x": 0, "y": 676, "width": 1720, "height": 44, "title": "Panel",
+                 "class": "plasmashell", "pid": 0, "active": false},
+                {"x": 0, "y": 0, "width": 1720, "height": 720, "title": "",
+                 "class": "backdrop", "pid": 7, "active": false}
+            ]
+        });
+        let layout = parse_kwin(&report).unwrap();
+        assert_eq!(layout.bounds, Rect::new(0, 0, 1720, 720));
+        assert!(layout.windows[0].focused);
+        assert_eq!(layout.windows.len(), 2);
+        assert_eq!(layout.windows[1].class, "plasmashell");
+
+        // A display scale of 2: the frame has twice the logical size.
+        let shown = to_screen(&layout, Rect::new(0, 0, 3440, 1440));
+        assert_eq!(shown[0].rect, Rect::new(200, 100, 800, 600));
+        assert_eq!(shown[0].app, "kate");
+        assert_eq!(shown[1].rect, Rect::new(0, 1352, 3440, 88));
+
+        assert!(parse_kwin(&serde_json::json!({"windows": []})).is_none());
     }
 }
