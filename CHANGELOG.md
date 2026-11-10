@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+Fixed:
+
+- Linux: the updater downloaded into a folder with a fixed name in the shared
+  temporary directory. Another local user could prepare that folder and swap
+  the file between the checksum check and the installation. The folder is now
+  created anew for each update, with an unpredictable name and for this user
+  only.
+
 ## 0.5.0
 
 Added:
