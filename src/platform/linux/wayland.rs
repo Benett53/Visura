@@ -96,7 +96,7 @@ fn sway() -> Option<Layout> {
     parse_sway(&json("swaymsg", &["-t", "get_tree", "-r"])?)
 }
 
-fn is_kde() -> bool {
+pub(super) fn is_kde() -> bool {
     super::desktop().contains("kde")
 }
 

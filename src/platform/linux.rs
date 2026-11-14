@@ -357,6 +357,17 @@ pub fn withdraw_own_window() {
     let _ = d.conn.flush();
 }
 
+/// Make sure the overlay is in front and has the focus. KWin's focus stealing
+/// prevention often refuses a window that a shortcut-started program maps, so
+/// it opens behind the others until clicked. Asking through a KWin script is
+/// not subject to that. Runs on its own thread; other desktops ignore it.
+pub fn raise_own_window() {
+    let window = OWN_WINDOW.load(std::sync::atomic::Ordering::Relaxed);
+    if window != 0 && wayland::is_kde() {
+        std::thread::spawn(move || kwin::activate_window(window));
+    }
+}
+
 /// Ask KWin not to animate our window away. Without this the frozen overlay
 /// fades out over the live desktop after a selection, which looks like the
 /// screen stutters. Other window managers ignore the property.

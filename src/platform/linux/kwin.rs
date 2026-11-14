@@ -292,6 +292,68 @@ pub fn window_report() -> Option<String> {
     answer
 }
 
+/// Runs inside KWin: finds the X11 window with the given id and makes it the
+/// active one. A script may do that without KWin's focus stealing prevention
+/// getting a say, which is what keeps a freshly mapped overlay from opening
+/// behind other windows.
+const ACTIVATE_SCRIPT: &str = r#"(function () {
+    var list = workspace.stackingOrder;
+    for (var i = 0; i < list.length; i++) {
+        if (list[i].windowId == @ID@) {
+            workspace.activeWindow = list[i];
+            return;
+        }
+    }
+})();
+"#;
+
+/// Bring the X11 window `id` to the front and give it the focus. Returns
+/// once the script has been started; KWin runs it in a few milliseconds.
+pub fn activate_window(id: u32) {
+    let Ok(connection) = Connection::session() else {
+        return;
+    };
+    let plugin = format!("visura-activate-{}-{id}", std::process::id());
+    let file = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|dir| !dir.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join(format!("{plugin}.js"));
+    if std::fs::write(&file, ACTIVATE_SCRIPT.replace("@ID@", &id.to_string())).is_err() {
+        return;
+    }
+    let call = |path: &str, interface: &str, method: &str| {
+        connection.call_method(Some("org.kde.KWin"), path, Some(interface), method, &())
+    };
+    let loaded: Option<i32> = connection
+        .call_method(
+            Some("org.kde.KWin"),
+            "/Scripting",
+            Some("org.kde.kwin.Scripting"),
+            "loadScript",
+            &(file.to_string_lossy().as_ref(), plugin.as_str()),
+        )
+        .ok()
+        .and_then(|reply| reply.body().deserialize().ok());
+    if let Some(script) = loaded.filter(|id| *id >= 0) {
+        let _ = call(
+            &format!("/Scripting/Script{script}"),
+            "org.kde.kwin.Script",
+            "run",
+        );
+        // The script has no callback to wait for.
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    let _ = connection.call_method(
+        Some("org.kde.KWin"),
+        "/Scripting",
+        Some("org.kde.kwin.Scripting"),
+        "unloadScript",
+        &(plugin.as_str(),),
+    );
+    let _ = std::fs::remove_file(&file);
+}
+
 fn pipe() -> Result<(OwnedFd, OwnedFd), String> {
     use std::os::fd::FromRawFd as _;
 

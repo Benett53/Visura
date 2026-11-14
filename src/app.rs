@@ -107,6 +107,9 @@ pub struct App {
     minimized: bool,
     /// How the window should end up once the overlay is done.
     overlay_restore: Restore,
+    /// Linux: the overlay has been asked to come to the front.
+    #[cfg(target_os = "linux")]
+    overlay_raised: bool,
     /// Where the window was before the overlay took it over.
     saved_placement: Option<platform::Placement>,
     /// Applied one pass after the overlay closes, once the window has its
@@ -226,6 +229,8 @@ impl App {
             last_geometry: None,
             minimized: false,
             overlay_restore: Restore::Hidden,
+            #[cfg(target_os = "linux")]
+            overlay_raised: false,
             saved_placement: None,
             deferred_placement: None,
             session_shots: Vec::new(),
@@ -919,6 +924,14 @@ impl eframe::App for App {
                 // Puts the normal window type back after an overlay, once the
                 // overlay is off the screen. Does nothing otherwise.
                 platform::set_overlay_active(false);
+            }
+            // Once per overlay, as soon as it is on screen: KWin may have
+            // let it open behind other windows.
+            if self.overlay.is_none() {
+                self.overlay_raised = false;
+            } else if !self.overlay_raised && platform::own_window_is_visible() {
+                self.overlay_raised = true;
+                platform::raise_own_window();
             }
             if !self.visible
                 && self.overlay.is_none()
