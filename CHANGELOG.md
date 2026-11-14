@@ -1,9 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.5.1
 
 Fixed:
 
+- KDE Plasma (Wayland): the region overlay could open behind other windows
+  when started from a shortcut. It is now brought to the front through KWin.
 - Linux: the updater downloaded into a folder with a fixed name in the shared
   temporary directory. Another local user could prepare that folder and swap
   the file between the checksum check and the installation. The folder is now
