@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.2
+
+Fixed:
+
+- Linux: the window moved a little after every capture. Its position is now
+  checked after the capture and corrected.
+
 ## 0.5.1
 
 Fixed:

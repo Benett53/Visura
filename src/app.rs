@@ -67,6 +67,14 @@ pub enum OpenRequest {
     Edit(PathBuf),
 }
 
+/// A window position being corrected after a capture.
+struct GeometryFix {
+    target: egui::Pos2,
+    sent: egui::Pos2,
+    tries: u8,
+    next: std::time::Instant,
+}
+
 pub struct App {
     pub config: Config,
     /// The settings being edited. Applied on save, discarded on cancel.
@@ -101,6 +109,7 @@ pub struct App {
     /// Where the window sat before it became the overlay: outer position
     /// and inner size, both in points.
     last_geometry: Option<(egui::Pos2, egui::Vec2)>,
+    geometry_fix: Option<GeometryFix>,
     /// Minimised is not the same as hidden: the window is still on the task
     /// bar and still has a place to go back to. Tracked from the platform
     /// rather than assumed, because the user can minimise at any time.
@@ -227,6 +236,7 @@ impl App {
             overlay: None,
             pending: None,
             last_geometry: None,
+            geometry_fix: None,
             minimized: false,
             overlay_restore: Restore::Hidden,
             #[cfg(target_os = "linux")]
@@ -604,14 +614,65 @@ impl App {
             // window level from this one has reached the window.
             Some(placement) => self.deferred_placement = Some((placement, restore)),
             None => {
-                if let Some((position, size)) = self.last_geometry {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(position));
-                }
+                self.restore_geometry(ctx);
                 self.restore_window(ctx, restore);
             }
         }
         ctx.request_repaint();
+    }
+
+    /// Move and size the window back to where it was. A window manager may
+    /// place a framed window a little off when decorations come back in the
+    /// same pass, so `settle_geometry` checks the result and nudges it.
+    fn restore_geometry(&mut self, ctx: &egui::Context) {
+        let Some((position, size)) = self.last_geometry else {
+            return;
+        };
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(position));
+        self.geometry_fix = Some(GeometryFix {
+            target: position,
+            sent: position,
+            tries: 6,
+            next: std::time::Instant::now() + std::time::Duration::from_millis(150),
+        });
+        ctx.request_repaint_after(std::time::Duration::from_millis(150));
+    }
+
+    /// Compare where the window ended up with where it was, and correct the
+    /// difference. Runs a few times at most, then gives up.
+    fn settle_geometry(&mut self, ctx: &egui::Context) {
+        let Some(fix) = &mut self.geometry_fix else {
+            return;
+        };
+        if self.overlay.is_some() || self.pending.is_some() {
+            self.geometry_fix = None;
+            return;
+        }
+        if !self.visible || self.minimized {
+            // Nothing to correct on screen, and a later move by the user
+            // must not be undone.
+            self.geometry_fix = None;
+            return;
+        }
+        let now = std::time::Instant::now();
+        if now < fix.next {
+            ctx.request_repaint_after(fix.next - now);
+            return;
+        }
+        let Some(outer) = ctx.input(|i| i.viewport().outer_rect) else {
+            return;
+        };
+        let off = fix.target - outer.min;
+        if off.x.abs() < 1.0 && off.y.abs() < 1.0 || fix.tries == 0 {
+            self.geometry_fix = None;
+            return;
+        }
+        fix.tries -= 1;
+        fix.sent += off;
+        fix.next = now + std::time::Duration::from_millis(120);
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(fix.sent));
+        ctx.request_repaint_after(std::time::Duration::from_millis(120));
     }
 
     /// Put the window back the way it was before a capture. The fallback for
@@ -952,13 +1013,12 @@ impl eframe::App for App {
                 self.visible = restore != Restore::Hidden;
                 self.minimized = restore == Restore::Minimized;
             } else {
-                if let Some((position, size)) = self.last_geometry {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(position));
-                }
+                self.restore_geometry(ctx);
                 self.restore_window(ctx, restore);
             }
         }
+
+        self.settle_geometry(ctx);
 
         // The user can minimise at any time without telling the program, so
         // this is read rather than remembered.
@@ -1036,7 +1096,7 @@ impl eframe::App for App {
         // wherever the user last had it.
         // Not while a capture is in flight: the window is being moved and
         // hidden then, and remembering that would lose where it really lives.
-        if self.pending.is_none() {
+        if self.pending.is_none() && self.geometry_fix.is_none() {
             ctx.input(|i| {
                 if let (Some(outer), Some(inner)) =
                     (i.viewport().outer_rect, i.viewport().inner_rect)
