@@ -228,6 +228,36 @@ impl Receiver {
 /// the script above produces: logical coordinates plus the size of the
 /// whole desktop. `None` when KWin does not answer.
 pub fn window_report() -> Option<String> {
+    report("windows", WINDOW_SCRIPT)
+}
+
+/// Where KWin has our main window's frame, even while it is minimised. The
+/// toolkit reports the position of the content instead, which is off by the
+/// border and the title bar.
+pub fn own_frame() -> Option<(i32, i32)> {
+    let script = FRAME_SCRIPT.replace("@PID@", &std::process::id().to_string());
+    let json: serde_json::Value = serde_json::from_str(&report("frame", &script)?).ok()?;
+    Some((json["x"].as_i64()? as i32, json["y"].as_i64()? as i32))
+}
+
+/// Runs inside KWin and answers with the frame position of our main window.
+const FRAME_SCRIPT: &str = r#"(function () {
+    var list = workspace.stackingOrder;
+    for (var i = 0; i < list.length; i++) {
+        var w = list[i];
+        if (w.pid == @PID@ && w.caption == "Visura" && !w.fullScreen) {
+            var g = w.frameGeometry;
+            callDBus("@SERVICE@", "@PATH@", "@INTERFACE@", "Report",
+                JSON.stringify({ x: Math.round(g.x), y: Math.round(g.y) }));
+            return;
+        }
+    }
+})();
+"#;
+
+/// Load a script that calls back with `Report(json)`, run it, and wait for
+/// the answer.
+fn report(name: &str, template: &str) -> Option<String> {
     let connection = Connection::session().ok()?;
     let service = connection.unique_name()?.to_string();
     let (sender, receiver) = mpsc::channel();
@@ -237,13 +267,13 @@ pub fn window_report() -> Option<String> {
         .ok()?;
 
     let pid = std::process::id();
-    let plugin = format!("visura-windows-{pid}");
+    let plugin = format!("visura-{name}-{pid}");
     let file = std::env::var_os("XDG_RUNTIME_DIR")
         .filter(|dir| !dir.is_empty())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
         .join(format!("{plugin}.js"));
-    let script = WINDOW_SCRIPT
+    let script = template
         .replace("@SERVICE@", &service)
         .replace("@PATH@", REPORT_PATH)
         .replace("@INTERFACE@", REPORT_INTERFACE);
@@ -292,39 +322,47 @@ pub fn window_report() -> Option<String> {
     answer
 }
 
-/// Runs inside KWin: finds the X11 window with the given id and makes it the
-/// active one. A script may do that without KWin's focus stealing prevention
+/// Runs inside KWin: finds our main window (KWin scripts have no X11 window id
+/// to match on, so it is the one of this process titled "Visura") and makes it
+/// the active one. A script may do that without KWin's focus stealing prevention
 /// getting a say, which is what keeps a freshly mapped overlay from opening
 /// behind other windows.
 const ACTIVATE_SCRIPT: &str = r#"(function () {
     var list = workspace.stackingOrder;
     for (var i = 0; i < list.length; i++) {
-        if (list[i].windowId == @ID@) {
-            workspace.activeWindow = list[i];
+        var w = list[i];
+        if (w.pid == @PID@ && w.caption == "Visura") {
+            w.minimized = false;
+            workspace.activeWindow = w;
             return;
         }
     }
 })();
 "#;
 
-/// Bring the X11 window `id` to the front and give it the focus. Returns
-/// once the script has been started; KWin runs it in a few milliseconds.
-pub fn activate_window(id: u32) {
+/// Bring our main window to the front and give it the focus. Returns once the
+/// script has run; KWin takes a few milliseconds.
+pub fn activate_window() {
+    run_script(
+        "activate",
+        &ACTIVATE_SCRIPT.replace("@PID@", &std::process::id().to_string()),
+    );
+}
+
+/// Load a script into KWin, run it once and unload it again.
+fn run_script(name: &str, source: &str) {
     let Ok(connection) = Connection::session() else {
         return;
     };
-    let plugin = format!("visura-activate-{}-{id}", std::process::id());
+    let plugin = format!("visura-{name}-{}", std::process::id());
     let file = std::env::var_os("XDG_RUNTIME_DIR")
         .filter(|dir| !dir.is_empty())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
         .join(format!("{plugin}.js"));
-    if std::fs::write(&file, ACTIVATE_SCRIPT.replace("@ID@", &id.to_string())).is_err() {
+    if std::fs::write(&file, source).is_err() {
         return;
     }
-    let call = |path: &str, interface: &str, method: &str| {
-        connection.call_method(Some("org.kde.KWin"), path, Some(interface), method, &())
-    };
     let loaded: Option<i32> = connection
         .call_method(
             Some("org.kde.KWin"),
@@ -336,10 +374,12 @@ pub fn activate_window(id: u32) {
         .ok()
         .and_then(|reply| reply.body().deserialize().ok());
     if let Some(script) = loaded.filter(|id| *id >= 0) {
-        let _ = call(
-            &format!("/Scripting/Script{script}"),
-            "org.kde.kwin.Script",
+        let _ = connection.call_method(
+            Some("org.kde.KWin"),
+            format!("/Scripting/Script{script}"),
+            Some("org.kde.kwin.Script"),
             "run",
+            &(),
         );
         // The script has no callback to wait for.
         std::thread::sleep(Duration::from_millis(150));
@@ -352,6 +392,37 @@ pub fn activate_window(id: u32) {
         &(plugin.as_str(),),
     );
     let _ = std::fs::remove_file(&file);
+}
+
+/// Runs inside KWin: moves our main window, keeping its size. KWin does this
+/// exactly and also for a minimised window, which the window toolkit cannot
+/// place without the offset of the title bar creeping in.
+const PLACE_SCRIPT: &str = r#"(function () {
+    var list = workspace.stackingOrder;
+    for (var i = 0; i < list.length; i++) {
+        var w = list[i];
+        if (w.pid == @PID@ && w.caption == "Visura" && !w.fullScreen) {
+            var g = w.frameGeometry;
+            w.frameGeometry = { x: @X@, y: @Y@, width: g.width, height: g.height };
+            return;
+        }
+    }
+})();
+"#;
+
+/// Put our main window's frame at `x`, `y` (desktop coordinates). Waits a
+/// moment first so that the window has finished leaving the overlay.
+pub fn place_window(x: i32, y: i32) {
+    let script = PLACE_SCRIPT
+        .replace("@PID@", &std::process::id().to_string())
+        .replace("@X@", &x.to_string())
+        .replace("@Y@", &y.to_string());
+    // The script skips a window that is still full screen, so it is run twice:
+    // once soon, and once more in case the first came too early.
+    std::thread::sleep(Duration::from_millis(80));
+    run_script("place", &script);
+    std::thread::sleep(Duration::from_millis(250));
+    run_script("place", &script);
 }
 
 fn pipe() -> Result<(OwnedFd, OwnedFd), String> {

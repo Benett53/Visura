@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.3
+
+Fixed:
+
+- KDE Plasma (Wayland): the window moved a little further after every
+  capture. Its position is now read from and restored through KWin.
+- KDE Plasma (Wayland): the region overlay could still open behind other
+  windows. It is now activated through KWin.
+
 ## 0.5.2
 
 Fixed:

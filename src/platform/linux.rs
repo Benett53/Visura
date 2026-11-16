@@ -306,7 +306,20 @@ fn keycode_for(d: &Display, keysym: u32) -> Option<u8> {
 /// setting size, position and visibility one command at a time.
 pub struct Placement;
 
+/// Where KWin had the window frame before the overlay took it over.
+static SAVED_FRAME: std::sync::Mutex<Option<(i32, i32)>> = std::sync::Mutex::new(None);
+
+/// There is no placement to save on X11, but under KDE the exact frame
+/// position is noted here so that `place_own_window` can put it back.
 pub fn save_window_placement() -> Option<Placement> {
+    let frame = if wayland::is_kde() {
+        kwin::own_frame()
+    } else {
+        None
+    };
+    if let Ok(mut saved) = SAVED_FRAME.lock() {
+        *saved = frame;
+    }
     None
 }
 
@@ -362,10 +375,21 @@ pub fn withdraw_own_window() {
 /// it opens behind the others until clicked. Asking through a KWin script is
 /// not subject to that. Runs on its own thread; other desktops ignore it.
 pub fn raise_own_window() {
-    let window = OWN_WINDOW.load(std::sync::atomic::Ordering::Relaxed);
-    if window != 0 && wayland::is_kde() {
-        std::thread::spawn(move || kwin::activate_window(window));
+    if wayland::is_kde() {
+        std::thread::spawn(kwin::activate_window);
     }
+}
+
+/// Put the window frame back where `save_window_placement` found it, through
+/// KWin: exact, and it also works while the window is minimised. Runs on its
+/// own thread. Returns false when there is nothing to restore (another
+/// desktop, or the window was not on screen).
+pub fn place_own_window() -> bool {
+    let Some((x, y)) = SAVED_FRAME.lock().ok().and_then(|saved| *saved) else {
+        return false;
+    };
+    std::thread::spawn(move || kwin::place_window(x, y));
+    true
 }
 
 /// Ask KWin not to animate our window away. Without this the frozen overlay

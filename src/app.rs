@@ -629,6 +629,13 @@ impl App {
             return;
         };
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        // KWin knows where the frame was and places it exactly. Moving it here
+        // as well would only add a jump, and the toolkit's idea of the
+        // position is off by the border and title bar.
+        #[cfg(target_os = "linux")]
+        if platform::place_own_window() {
+            return;
+        }
         ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(position));
         self.geometry_fix = Some(GeometryFix {
             target: position,
